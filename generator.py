@@ -4,6 +4,7 @@ import stat
 import time
 import re
 import sys
+import base64
 import requests
 
 
@@ -19,20 +20,38 @@ OUTPUT_FILE = BASE_DIR / "script.sh"
 
 BATCH_SIZE = 3
 
+# ------------------------------------------------------------
 # GitHub
+# ------------------------------------------------------------
+
 GITHUB_OWNER = "forgotenmywin"
 GITHUB_REPO = "K"
 GITHUB_REF = "main"
-WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "main.yml")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+
+WORKFLOW_FILE = os.environ.get(
+    "WORKFLOW_FILE",
+    "main.yml"
+)
+
+GITHUB_TOKEN = os.environ.get(
+    "GITHUB_TOKEN"
+)
 
 GITHUB_API = "https://api.github.com"
+
 GITHUB_API_VERSION = "2026-03-10"
 
-# Section 2 timing
+# ------------------------------------------------------------
+# Section 2
+# ------------------------------------------------------------
+
 INITIAL_WAIT_SECONDS = 60
-JOB_RETRY_COUNT = 24
-JOB_RETRY_DELAY = 5
+
+LOG_FILE_PATH = "logs.txt"
+
+# برای حالتی که logs.txt کمی دیرتر commit شود
+LOG_RETRY_COUNT = 12
+LOG_RETRY_DELAY = 5
 
 
 # ============================================================
@@ -48,24 +67,15 @@ def fail(message: str):
 
 def github_headers():
     if not GITHUB_TOKEN:
-        fail("GITHUB_TOKEN is not set")
+        fail(
+            "GITHUB_TOKEN is not set"
+        )
 
     return {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
-
-
-def validate_response(response, expected_codes=(200,)):
-    if response.status_code not in expected_codes:
-        body = response.text[:1000]
-        fail(
-            f"GitHub API error\n"
-            f"HTTP: {response.status_code}\n"
-            f"URL: {response.url}\n"
-            f"Response: {body}"
-        )
 
 
 # ============================================================
@@ -76,25 +86,36 @@ print("======================================")
 print(" FIRST BATCH GENERATOR")
 print("======================================")
 
+
 # ------------------------------------------------------------
 # Check files
 # ------------------------------------------------------------
 
 if not ADDRESSES_FILE.exists():
-    fail(f"Missing file: {ADDRESSES_FILE}")
+    fail(
+        f"Missing file: {ADDRESSES_FILE}"
+    )
 
 if not TEMPLATE_FILE.exists():
-    fail(f"Missing file: {TEMPLATE_FILE}")
+    fail(
+        f"Missing file: {TEMPLATE_FILE}"
+    )
+
 
 # ------------------------------------------------------------
 # Load addresses.txt
 # ------------------------------------------------------------
 
-raw_lines = ADDRESSES_FILE.read_text(encoding="utf-8").splitlines()
+raw_lines = ADDRESSES_FILE.read_text(
+    encoding="utf-8"
+).splitlines()
 
 records = []
 
-for line_no, raw in enumerate(raw_lines, start=1):
+for line_no, raw in enumerate(
+    raw_lines,
+    start=1
+):
     line = raw.strip()
 
     if not line:
@@ -102,11 +123,14 @@ for line_no, raw in enumerate(raw_lines, start=1):
 
     if ":" not in line:
         fail(
-            f"Invalid addresses.txt format at line {line_no}: "
-            f"{raw}"
+            f"Invalid addresses.txt format "
+            f"at line {line_no}: {raw}"
         )
 
-    index_text, address = line.split(":", 1)
+    index_text, address = line.split(
+        ":",
+        1
+    )
 
     index_text = index_text.strip()
     address = address.strip()
@@ -129,7 +153,11 @@ for line_no, raw in enumerate(raw_lines, start=1):
         }
     )
 
-print(f"Loaded records: {len(records)}")
+
+print(
+    f"Loaded records: {len(records)}"
+)
+
 
 if len(records) != 102:
     fail(
@@ -137,44 +165,68 @@ if len(records) != 102:
         f"found {len(records)}"
     )
 
+
 # ------------------------------------------------------------
 # Load template
 # ------------------------------------------------------------
 
-template = TEMPLATE_FILE.read_text(encoding="utf-8")
+template = TEMPLATE_FILE.read_text(
+    encoding="utf-8"
+)
 
-print("Loaded template: template.sh")
+print(
+    "Loaded template: template.sh"
+)
 
-if "__ADDRESS1__" not in template:
-    fail("Missing placeholder: __ADDRESS1__")
-
-if "__INDEX1__" not in template:
-    fail("Missing placeholder: __INDEX1__")
-
-if "__ADDRESS2__" not in template:
-    fail("Missing placeholder: __ADDRESS2__")
-
-if "__INDEX2__" not in template:
-    fail("Missing placeholder: __INDEX2__")
-
-if "__ADDRESS3__" not in template:
-    fail("Missing placeholder: __ADDRESS3__")
-
-if "__INDEX3__" not in template:
-    fail("Missing placeholder: __INDEX3__")
 
 # ------------------------------------------------------------
-# First 3 records
+# Verify placeholders
+# ------------------------------------------------------------
+
+required_placeholders = [
+    "__ADDRESS1__",
+    "__INDEX1__",
+    "__ADDRESS2__",
+    "__INDEX2__",
+    "__ADDRESS3__",
+    "__INDEX3__",
+]
+
+for placeholder in required_placeholders:
+    if placeholder not in template:
+        fail(
+            f"Missing placeholder: {placeholder}"
+        )
+
+
+# ------------------------------------------------------------
+# First batch
 # ------------------------------------------------------------
 
 batch = records[:BATCH_SIZE]
 
+if len(batch) != 3:
+    fail(
+        "Could not create a complete batch of 3 records"
+    )
+
+
 print("First batch:")
 
-for pos, item in enumerate(batch, start=1):
-    print(f"  TARGET{pos}")
-    print(f"    index:   {item['index']}")
-    print(f"    address: {item['address']}")
+for pos, item in enumerate(
+    batch,
+    start=1
+):
+    print(
+        f"  TARGET{pos}"
+    )
+    print(
+        f"    index:   {item['index']}"
+    )
+    print(
+        f"    address: {item['address']}"
+    )
+
 
 # ------------------------------------------------------------
 # Replace placeholders
@@ -186,6 +238,7 @@ generated = generated.replace(
     "__ADDRESS1__",
     batch[0]["address"]
 )
+
 generated = generated.replace(
     "__INDEX1__",
     str(batch[0]["index"])
@@ -195,6 +248,7 @@ generated = generated.replace(
     "__ADDRESS2__",
     batch[1]["address"]
 )
+
 generated = generated.replace(
     "__INDEX2__",
     str(batch[1]["index"])
@@ -204,13 +258,15 @@ generated = generated.replace(
     "__ADDRESS3__",
     batch[2]["address"]
 )
+
 generated = generated.replace(
     "__INDEX3__",
     str(batch[2]["index"])
 )
 
+
 # ------------------------------------------------------------
-# Write generated script
+# Write script.sh
 # ------------------------------------------------------------
 
 OUTPUT_FILE.write_text(
@@ -222,33 +278,48 @@ OUTPUT_FILE.chmod(
     OUTPUT_FILE.stat().st_mode | stat.S_IXUSR
 )
 
+
 print("======================================")
 print("GENERATED FILE")
 print("======================================")
-print(f"Output: {OUTPUT_FILE}")
-print(f"Size:   {OUTPUT_FILE.stat().st_size} bytes")
+
+print(
+    f"Output: {OUTPUT_FILE}"
+)
+
+print(
+    f"Size:   {OUTPUT_FILE.stat().st_size} bytes"
+)
+
 
 print("======================================")
 print("GENERATED TARGETS")
 print("======================================")
+
 print(
     f"ADDRESS1 = {batch[0]['address']}"
 )
+
 print(
     f"INDEX1   = {batch[0]['index']}"
 )
+
 print(
     f"ADDRESS2 = {batch[1]['address']}"
 )
+
 print(
     f"INDEX2   = {batch[1]['index']}"
 )
+
 print(
     f"ADDRESS3 = {batch[2]['address']}"
 )
+
 print(
     f"INDEX3   = {batch[2]['index']}"
 )
+
 
 print("======================================")
 print("SECTION 1 COMPLETE")
@@ -263,18 +334,33 @@ print("======================================")
 print(" SECTION 2 - GITHUB WORKFLOW")
 print("======================================")
 
-print(f"Repository : {GITHUB_OWNER}/{GITHUB_REPO}")
-print(f"Workflow   : {WORKFLOW_FILE}")
-print(f"Ref        : {GITHUB_REF}")
+
+print(
+    f"Repository : {GITHUB_OWNER}/{GITHUB_REPO}"
+)
+
+print(
+    f"Workflow   : {WORKFLOW_FILE}"
+)
+
+print(
+    f"Ref        : {GITHUB_REF}"
+)
+
 
 if not GITHUB_TOKEN:
-    fail("GITHUB_TOKEN is missing from Railway Variables")
+    fail(
+        "GITHUB_TOKEN is missing from Railway Variables"
+    )
 
-print("GitHub Token: FOUND")
+
+print(
+    "GitHub Token: FOUND"
+)
 
 
 # ============================================================
-# 2A. TRIGGER WORKFLOW AND GET EXACT RUN ID
+# 2A. TRIGGER WORKFLOW
 # ============================================================
 
 dispatch_url = (
@@ -283,10 +369,12 @@ dispatch_url = (
     f"workflows/{WORKFLOW_FILE}/dispatches"
 )
 
+
 dispatch_payload = {
     "ref": GITHUB_REF,
     "return_run_details": True,
 }
+
 
 try:
     dispatch_response = requests.post(
@@ -295,46 +383,75 @@ try:
         json=dispatch_payload,
         timeout=30,
     )
-except requests.RequestException as exc:
-    fail(f"Workflow dispatch request failed: {exc}")
 
-if dispatch_response.status_code not in (200, 204):
+except requests.RequestException as exc:
     fail(
-        f"Workflow dispatch failed\n"
+        f"Workflow dispatch request failed: {exc}"
+    )
+
+
+if dispatch_response.status_code not in (
+    200,
+    204,
+):
+    fail(
+        "Workflow dispatch failed\n"
         f"HTTP: {dispatch_response.status_code}\n"
         f"Response: {dispatch_response.text[:1000]}"
     )
 
-print("Workflow dispatch: SUCCESS")
+
+print(
+    "Workflow dispatch: SUCCESS"
+)
 
 
 # ============================================================
-# 2B. READ RUN ID DIRECTLY FROM DISPATCH RESPONSE
+# 2B. GET RUN ID
 # ============================================================
 
 run_id = None
 
+
 if dispatch_response.status_code == 200:
+
     try:
-        dispatch_json = dispatch_response.json()
-    except ValueError:
-        fail(
-            "GitHub returned HTTP 200 but response was not JSON"
+        dispatch_json = (
+            dispatch_response.json()
         )
 
-    run_id = dispatch_json.get("workflow_run_id")
-
-    if not run_id:
+    except ValueError:
         fail(
-            "GitHub returned 200 but workflow_run_id was missing"
+            "GitHub returned HTTP 200 "
+            "but response was not JSON"
+        )
+
+    run_id = dispatch_json.get(
+        "workflow_run_id"
+    )
+
+    if run_id:
+        print(
+            f"Workflow Run ID: {run_id}"
+        )
+
+    else:
+        print(
+            "Workflow Run ID: not returned"
         )
 
 else:
-    # Compatibility fallback:
-    # If GitHub ever returns 204, find the newest matching run.
+
+    # --------------------------------------------------------
+    # Compatibility fallback for HTTP 204
+    # --------------------------------------------------------
+
     print(
-        "Dispatch returned 204; "
-        "using fallback Run-ID discovery..."
+        "Dispatch returned 204."
+    )
+
+    print(
+        "Finding newest workflow run..."
     )
 
     runs_url = (
@@ -345,7 +462,10 @@ else:
 
     deadline = time.time() + 30
 
-    while time.time() < deadline:
+    while (
+        time.time() < deadline
+    ):
+
         try:
             runs_response = requests.get(
                 runs_url,
@@ -356,371 +476,489 @@ else:
                 },
                 timeout=30,
             )
+
         except requests.RequestException:
             time.sleep(2)
             continue
 
-        if runs_response.status_code == 200:
+        if (
+            runs_response.status_code == 200
+        ):
+
             try:
-                runs_json = runs_response.json()
+                runs_json = (
+                    runs_response.json()
+                )
+
             except ValueError:
                 time.sleep(2)
                 continue
 
-            workflow_runs = runs_json.get(
-                "workflow_runs",
-                []
+            workflow_runs = (
+                runs_json.get(
+                    "workflow_runs",
+                    []
+                )
             )
 
             if workflow_runs:
-                run_id = workflow_runs[0].get("id")
+
+                candidate = (
+                    workflow_runs[0]
+                )
+
+                run_id = candidate.get(
+                    "id"
+                )
 
                 if run_id:
                     break
 
         time.sleep(2)
 
-    if not run_id:
-        fail(
-            "Could not determine workflow Run ID"
+    if run_id:
+        print(
+            f"Workflow Run ID: {run_id}"
+        )
+    else:
+        print(
+            "Workflow Run ID: not found"
         )
 
-print(f"Workflow Run ID: {run_id}")
-
 
 # ============================================================
-# 2C. WAIT EXACTLY 60 SECONDS
+# 2C. WAIT 60 SECONDS
 # ============================================================
 
-print("Waiting 60 seconds for workflow logs...")
+print(
+    "Waiting 60 seconds for logs.txt..."
+)
 
-for remaining in range(
-    INITIAL_WAIT_SECONDS,
-    0,
-    -10
-):
+remaining = INITIAL_WAIT_SECONDS
+
+while remaining > 0:
+
     print(
         f"  {remaining} seconds remaining..."
     )
-    sleep_for = min(10, remaining)
-    time.sleep(sleep_for)
 
-print("60 seconds completed.")
+    sleep_for = min(
+        10,
+        remaining
+    )
+
+    time.sleep(
+        sleep_for
+    )
+
+    remaining -= sleep_for
 
 
-# ============================================================
-# 2D. FIND JOBS FOR THIS EXACT RUN
-# ============================================================
-
-jobs_url = (
-    f"{GITHUB_API}/repos/"
-    f"{GITHUB_OWNER}/{GITHUB_REPO}/actions/"
-    f"runs/{run_id}/jobs"
+print(
+    "60 seconds completed."
 )
 
-job = None
 
-print("Searching for job in this Run...")
+# ============================================================
+# 2D. READ logs.txt FROM REPOSITORY
+# ============================================================
+
+print("======================================")
+print(" READING logs.txt")
+print("======================================")
+
+
+logs_url = (
+    f"{GITHUB_API}/repos/"
+    f"{GITHUB_OWNER}/{GITHUB_REPO}/contents/"
+    f"{LOG_FILE_PATH}"
+)
+
+
+logs_json = None
+logs_text = None
+
 
 for attempt in range(
     1,
-    JOB_RETRY_COUNT + 1
+    LOG_RETRY_COUNT + 1
 ):
+
+    print(
+        f"Checking logs.txt "
+        f"(attempt {attempt}/{LOG_RETRY_COUNT})..."
+    )
+
     try:
-        jobs_response = requests.get(
-            jobs_url,
+
+        logs_response = requests.get(
+            logs_url,
             headers=github_headers(),
             params={
-                "filter": "all",
-                "per_page": 100,
+                "ref": GITHUB_REF
             },
             timeout=30,
         )
+
     except requests.RequestException as exc:
+
         print(
-            f"  Job request failed "
-            f"(attempt {attempt}/{JOB_RETRY_COUNT}): {exc}"
+            f"Request error: {exc}"
         )
-        time.sleep(JOB_RETRY_DELAY)
+
+        if attempt < LOG_RETRY_COUNT:
+            time.sleep(
+                LOG_RETRY_DELAY
+            )
+
         continue
 
-    if jobs_response.status_code == 200:
+
+    if logs_response.status_code == 200:
+
         try:
-            jobs_json = jobs_response.json()
+            logs_json = (
+                logs_response.json()
+            )
+
         except ValueError:
+
             print(
-                f"  Invalid JSON from jobs endpoint "
-                f"(attempt {attempt}/{JOB_RETRY_COUNT})"
+                "Invalid JSON response."
             )
-            time.sleep(JOB_RETRY_DELAY)
+
+            if attempt < LOG_RETRY_COUNT:
+                time.sleep(
+                    LOG_RETRY_DELAY
+                )
+
             continue
 
-        jobs = jobs_json.get("jobs", [])
 
-        if jobs:
-            # Prefer the known job name "debug"
-            debug_jobs = [
-                item
-                for item in jobs
-                if item.get("name") == "debug"
-            ]
-
-            if debug_jobs:
-                job = debug_jobs[0]
-            else:
-                job = jobs[0]
-
-            break
-
-        print(
-            f"  No job yet "
-            f"(attempt {attempt}/{JOB_RETRY_COUNT})"
-        )
-
-    else:
-        print(
-            f"  Jobs API HTTP {jobs_response.status_code} "
-            f"(attempt {attempt}/{JOB_RETRY_COUNT})"
-        )
-
-    time.sleep(JOB_RETRY_DELAY)
-
-
-if not job:
-    fail(
-        "Could not find a job for the workflow Run"
-    )
-
-job_id = job.get("id")
-job_name = job.get("name")
-job_status = job.get("status")
-job_conclusion = job.get("conclusion")
-
-print("Job found:")
-print(f"  Job ID      : {job_id}")
-print(f"  Job name    : {job_name}")
-print(f"  Job status  : {job_status}")
-print(f"  Conclusion  : {job_conclusion}")
-
-
-# ============================================================
-# 2E. DOWNLOAD JOB LOG
-# ============================================================
-
-job_logs_url = (
-    f"{GITHUB_API}/repos/"
-    f"{GITHUB_OWNER}/{GITHUB_REPO}/actions/"
-    f"jobs/{job_id}/logs"
-)
-
-logs_text = None
-
-print("Retrieving Job logs...")
-
-for attempt in range(
-    1,
-    JOB_RETRY_COUNT + 1
-):
-    try:
-        log_response = requests.get(
-            job_logs_url,
-            headers=github_headers(),
-            allow_redirects=False,
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        print(
-            f"  Log request failed "
-            f"(attempt {attempt}/{JOB_RETRY_COUNT}): {exc}"
-        )
-        time.sleep(JOB_RETRY_DELAY)
-        continue
-
-    # GitHub returns a redirect to the actual log file.
-    if log_response.status_code == 302:
-        location = log_response.headers.get("Location")
-
-        if not location:
-            print(
-                "  HTTP 302 received but Location header "
-                "was missing"
-            )
-            time.sleep(JOB_RETRY_DELAY)
-            continue
-
-        try:
-            download_response = requests.get(
-                location,
-                timeout=30,
-            )
-        except requests.RequestException as exc:
-            print(
-                f"  Log download failed "
-                f"(attempt {attempt}/{JOB_RETRY_COUNT}): {exc}"
-            )
-            time.sleep(JOB_RETRY_DELAY)
-            continue
-
-        if download_response.status_code == 200:
-            logs_text = download_response.text
-            break
-
-        print(
-            f"  Signed log URL returned "
-            f"HTTP {download_response.status_code}"
-        )
-
-    elif log_response.status_code == 200:
-        logs_text = log_response.text
         break
 
-    else:
+
+    if logs_response.status_code == 404:
+
         print(
-            f"  Log endpoint HTTP "
-            f"{log_response.status_code} "
-            f"(attempt {attempt}/{JOB_RETRY_COUNT})"
+            "logs.txt not found yet."
         )
 
-    time.sleep(JOB_RETRY_DELAY)
+    else:
+
+        print(
+            f"GitHub HTTP "
+            f"{logs_response.status_code}"
+        )
+
+        print(
+            logs_response.text[:500]
+        )
 
 
-if logs_text is None:
+    if attempt < LOG_RETRY_COUNT:
+        time.sleep(
+            LOG_RETRY_DELAY
+        )
+
+
+if logs_json is None:
     fail(
-        "Could not retrieve workflow job logs "
-        "after all retries"
+        "Could not retrieve logs.txt"
+    )
+
+
+# ============================================================
+# 2E. DECODE logs.txt
+# ============================================================
+
+if logs_json.get("type") != "file":
+    fail(
+        "logs.txt is not a regular file"
+    )
+
+
+encoded_content = logs_json.get(
+    "content"
+)
+
+if not encoded_content:
+    fail(
+        "logs.txt has no content"
+    )
+
+
+try:
+
+    logs_text = base64.b64decode(
+        encoded_content
+    ).decode(
+        "utf-8",
+        errors="replace"
+    )
+
+except Exception as exc:
+
+    fail(
+        f"Could not decode logs.txt: {exc}"
     )
 
 
 print(
-    f"Retrieved logs: {len(logs_text)} characters"
+    f"logs.txt loaded: "
+    f"{len(logs_text)} characters"
 )
 
 
 # ============================================================
-# 2F. FIND ENDPOINT + TOKEN
+# 2F. FIND ENDPOINT
 # ============================================================
-
-# Endpoint format expected from your workflow:
-# API:
-# https://something.trycloudflare.com/command
 
 endpoint_match = re.search(
     r"(?m)^\s*API:\s*(https://[^\s]+/command)\s*$",
-    logs_text,
+    logs_text
 )
 
-# Token format:
-# TOKEN:
-# abcdefghijkl....
+
+# ============================================================
+# 2G. FIND TOKEN PRESENCE
+# ============================================================
+
 token_match = re.search(
     r"(?m)^\s*TOKEN:\s*([A-Za-z0-9_-]{20,})\s*$",
-    logs_text,
+    logs_text
 )
+
 
 print("======================================")
 print(" LOG SEARCH RESULTS")
 print("======================================")
 
-if endpoint_match:
-    endpoint = endpoint_match.group(1).strip()
 
-    print("Endpoint: FOUND")
-    print(f"Endpoint URL: {endpoint}")
+if endpoint_match:
+
+    endpoint = (
+        endpoint_match.group(1)
+        .strip()
+    )
+
+    print(
+        "Endpoint: FOUND"
+    )
+
+    print(
+        f"Endpoint URL: {endpoint}"
+    )
+
 else:
+
     endpoint = None
-    print("Endpoint: NOT FOUND")
+
+    print(
+        "Endpoint: NOT FOUND"
+    )
+
 
 if token_match:
-    workflow_token = token_match.group(1).strip()
 
-    print("Token: FOUND")
     print(
-        "Token value: [REDACTED]"
+        "Token: FOUND"
     )
+
 else:
-    workflow_token = None
-    print("Token: NOT FOUND")
+
+    print(
+        "Token: NOT FOUND"
+    )
 
 
 # ============================================================
-# 2G. PRINT CURL TEMPLATE ONLY
-#     NO CURL IS EXECUTED
-#     NO SCRIPT IS EXECUTED
+# 2H. PRINT CURL TEXT ONLY
+#     NOTHING IS EXECUTED
 # ============================================================
 
-if endpoint and workflow_token:
+if endpoint and token_match:
 
     print("======================================")
     print(" FOUND — CURL COMMANDS")
     print("======================================")
 
-    print("curl -X POST "
-          f"\"{endpoint}\" \\")
-    print("  -H "
-          "\"Authorization: Bearer <WORKFLOW_TOKEN>\" \\")
-    print("  -H "
-          "\"Content-Type: application/json\" \\")
-    print("  -d "
-          "'{\"command\":\"whoami && id\"}'")
+
+    print(
+        f'curl -X POST "{endpoint}" \\'
+    )
+
+    print(
+        '  -H "Authorization: Bearer <WORKFLOW_TOKEN>" \\'
+    )
+
+    print(
+        '  -H "Content-Type: application/json" \\'
+    )
+
+    print(
+        """  -d '{"command":"whoami && id"}'"""
+    )
+
 
     print()
-    print("For script.sh:")
+    print(
+        "For script.sh:"
+    )
     print()
 
-    print("B64=$(base64 -w0 /app/script.sh)")
 
     print(
-        "curl -X POST "
-        f"\"{endpoint}\" \\"
-    )
-    print(
-        "  -H "
-        "\"Authorization: Bearer <WORKFLOW_TOKEN>\" \\"
-    )
-    print(
-        "  -H "
-        "\"Content-Type: application/json\" \\"
-    )
-    print(
-        "  -d "
-        "'{\"command\":\"echo '$B64' > /tmp/script.b64\"}'"
+        "B64=$(base64 -w0 /app/script.sh)"
     )
 
     print()
 
+
     print(
-        "curl -X POST "
-        f"\"{endpoint}\" \\"
+        f'curl -X POST "{endpoint}" \\'
     )
+
     print(
-        "  -H "
-        "\"Authorization: Bearer <WORKFLOW_TOKEN>\" \\"
+        '  -H "Authorization: Bearer <WORKFLOW_TOKEN>" \\'
     )
+
     print(
-        "  -H "
-        "\"Content-Type: application/json\" \\"
+        '  -H "Content-Type: application/json" \\'
     )
+
     print(
-        "  -d "
-        "'{\"command\":\"base64 -d /tmp/script.b64 | bash\"}' \\"
+        """  -d '{"command":"echo $B64 > /tmp/script.b64"}'"""
     )
+
+
+    print()
+
+
+    print(
+        f'curl -X POST "{endpoint}" \\'
+    )
+
+    print(
+        '  -H "Authorization: Bearer <WORKFLOW_TOKEN>" \\'
+    )
+
+    print(
+        '  -H "Content-Type: application/json" \\'
+    )
+
+    print(
+        """  -d '{"command":"base64 -d /tmp/script.b64 | bash"}' \\ """
+    )
+
     print(
         "  --max-time 300"
     )
 
+
     print("======================================")
-    print("SECTION 2 COMPLETE")
+    print(" CURL PRINT COMPLETE")
     print("======================================")
+
 
 else:
+
     print("======================================")
-    print("SECTION 2 FAILED")
+    print(" SECTION 2 FAILED")
     print("======================================")
+
 
     if not endpoint:
-        print("Reason: API endpoint was not found.")
+        print(
+            "Reason: API endpoint was not found."
+        )
 
-    if not workflow_token:
-        print("Reason: workflow token was not found.")
 
-    sys.exit(1)
+    if not token_match:
+        print(
+            "Reason: token was not found."
+        )
+
+
+# ============================================================
+# 2I. DELETE logs.txt
+# ============================================================
+
+print("======================================")
+print(" DELETING logs.txt")
+print("======================================")
+
+
+file_sha = logs_json.get(
+    "sha"
+)
+
+
+if not file_sha:
+
+    print(
+        "WARNING: logs.txt SHA not found."
+    )
+
+else:
+
+    delete_payload = {
+        "message": "Delete temporary logs.txt",
+        "sha": file_sha,
+        "branch": GITHUB_REF,
+    }
+
+
+    try:
+
+        delete_response = requests.delete(
+            logs_url,
+            headers=github_headers(),
+            json=delete_payload,
+            timeout=30,
+        )
+
+    except requests.RequestException as exc:
+
+        print(
+            f"WARNING: Could not delete logs.txt: {exc}"
+        )
+
+    else:
+
+        if delete_response.status_code == 200:
+
+            print(
+                "logs.txt deleted successfully."
+            )
+
+        else:
+
+            print(
+                "WARNING: Could not delete logs.txt."
+            )
+
+            print(
+                f"HTTP: {delete_response.status_code}"
+            )
+
+
+# ============================================================
+# FINAL RESULT
+# ============================================================
+
+print("======================================")
+
+if endpoint and token_match:
+
+    print(
+        "SECTION 2 COMPLETE"
+    )
+
+else:
+
+    print(
+        "SECTION 2 FINISHED WITHOUT MATCH"
+    )
+
+print("======================================")
