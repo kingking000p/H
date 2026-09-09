@@ -21,11 +21,11 @@ OUTPUT_FILE = BASE_DIR / "script.sh"
 BATCH_SIZE = 3
 
 # ============================================================
-# GITHUB CONFIG
+# GITHUB CONFIG ✅ اصلاح‌شده
 # ============================================================
 
-GITHUB_OWNER = "forgotenmywin"
-GITHUB_REPO = "K"
+GITHUB_OWNER = "kingking000p"      # ✅ اصلاح شد
+GITHUB_REPO = "H"                  # ✅ اصلاح شد
 GITHUB_REF = "main"
 
 WORKFLOW_FILE = os.environ.get(
@@ -868,7 +868,7 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=payload2,
-            timeout=600  # ✅ تغییر: 10 دقیقه (600 ثانیه)
+            timeout=600
         )
     except requests.RequestException as e:
         print(f"ERROR: Step 2 request failed: {e}")
@@ -978,7 +978,7 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=cancel_payload,
-            timeout=60  # ✅ تغییر: 60 ثانیه (به جای 30)
+            timeout=60
         )
     except requests.RequestException as exc:
         print(f"WARNING: Could not cancel server: {exc}")
@@ -1046,18 +1046,21 @@ new_content_b64 = base64.b64encode(new_content.encode('utf-8')).decode('ascii')
 
 # 3. دریافت SHA فایل فعلی (برای آپدیت)
 file_sha = None
+addresses_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt"
 try:
+    print(f"Fetching current addresses.txt from: {addresses_url}")
     get_file_resp = requests.get(
-        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt",
+        addresses_url,
         headers=github_headers(),
         params={"ref": GITHUB_REF},
         timeout=30
     )
     if get_file_resp.status_code == 200:
         file_sha = get_file_resp.json().get("sha")
-        print("Got addresses.txt SHA from GitHub.")
+        print(f"✅ Got addresses.txt SHA: {file_sha[:8]}...")
     else:
         print(f"WARNING: Could not get addresses.txt from GitHub. HTTP: {get_file_resp.status_code}")
+        print(f"Response: {get_file_resp.text[:200]}")
 except Exception as e:
     print(f"WARNING: Could not get file SHA: {e}")
 
@@ -1071,7 +1074,7 @@ if file_sha:
     }
     try:
         update_response = requests.put(
-            f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt",
+            addresses_url,
             headers=github_headers(),
             json=update_payload,
             timeout=30
