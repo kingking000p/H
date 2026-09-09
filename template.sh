@@ -7,7 +7,7 @@ import requests
 import nanopy
 
 # ============================================================
-# 👇👇👇 فقط همین هفت متغیر را وارد کن 👇👇👇
+# 👇👇👇 Enter only these seven variables 👇👇👇
 # ============================================================
 
 SEED = 'fshfesiu'
@@ -22,19 +22,19 @@ INDEX3  = __INDEX3__
 
 # ============================================================
 
-# ---- اعتبارسنجی اولیه (همه باید پر باشند) ----
+# ---- Initial validation (all must be filled) ----
 if not SEED or SEED == 'SEED-خودت-اینجا':
-    raise SystemExit("❌ ERROR: SEED را به درستی وارد کن!")
+    raise SystemExit("❌ ERROR: Enter the SEED correctly!")
 
 if not ADDRESS1 or ADDRESS1 == 'nano_1abc...' or not ADDRESS2 or ADDRESS2 == 'nano_2def...' or not ADDRESS3 or ADDRESS3 == 'nano_3ghi...':
-    raise SystemExit("❌ ERROR: همه آدرس‌ها باید کامل و معتبر باشند!")
+    raise SystemExit("❌ ERROR: All addresses must be complete and valid!")
 
 try:
     INDEX1, INDEX2, INDEX3 = int(INDEX1), int(INDEX2), int(INDEX3)
 except Exception:
-    raise SystemExit("❌ ERROR: ایندکس‌ها باید عدد صحیح باشند!")
+    raise SystemExit("❌ ERROR: Indexes must be integers!")
 
-# لیست نهایی برای پردازش
+# Final list for processing
 TARGETS = [
     {'address': ADDRESS1, 'index': INDEX1},
     {'address': ADDRESS2, 'index': INDEX2},
@@ -265,7 +265,7 @@ def receive(index, address, pending):
 
 def final_balance(items):
     if not items:
-        print("\nهیچ آدرسی موفق نبود، موجودی نمایش داده نمی‌شود.")
+        print("\nNo address was successful, balance will not be displayed.")
         return
 
     print()
@@ -327,7 +327,7 @@ for target in TARGETS:
             successful.append(item)
             print(f">>> SUCCESSFUL CLAIM for {addr}")
 
-            # منتظر بمان تا تراکنش برسد و سپس دریافت کن
+            # Wait for the transaction to arrive, then receive it
             pending = wait_for_pending(idx, addr)
             if pending:
                 receive(idx, addr, pending)
@@ -352,7 +352,7 @@ for target in TARGETS:
 
 
 # ============================================================
-# نمایش موجودی نهایی
+# DISPLAY FINAL BALANCE
 # ============================================================
 
 if successful:
@@ -361,7 +361,7 @@ if successful:
     except Exception as e:
         print(f"Final balance error: {e}")
 else:
-    print("\nهیچ ادعای موفقی وجود نداشت.")
+    print("\nNo successful claims.")
 
 print()
 print("======================================")
