@@ -155,7 +155,6 @@ print(
 )
 
 
-# ✅ تغییر: فقط بررسی می‌کنیم حداقل BATCH_SIZE رکورد وجود داشته باشد
 if len(records) < BATCH_SIZE:
     fail(
         f"Need at least {BATCH_SIZE} records, "
@@ -809,12 +808,6 @@ else:
 # ============================================================
 # 2H. EXECUTE BOTH REQUESTS (via requests)
 # ============================================================
-#
-# مرحله 1: ارسال script.sh به سرور (تبدیل به base64)
-# مرحله 2: اجرای اسکریپت روی سرور (base64 -d | bash)
-# نتیجه هر دو مرحله به‌صورت تمیز چاپ می‌شود.
-#
-# ============================================================
 
 if endpoint and token_value:
 
@@ -822,7 +815,6 @@ if endpoint and token_value:
     print(" EXECUTING STEP 1: SEND SCRIPT")
     print("======================================")
 
-    # ---- مرحله 1: ارسال script.sh ----
     try:
         with open("script.sh", "rb") as f:
             script_bytes = f.read()
@@ -849,7 +841,6 @@ if endpoint and token_value:
         print(f"ERROR: Step 1 request failed: {e}")
         sys.exit(1)
 
-    # گزارش مرحله 1
     print()
     print("=== STEP 1 RESULT ===")
     print(f"Status code: {response1.status_code}")
@@ -861,7 +852,6 @@ if endpoint and token_value:
     print("=====================")
     print()
 
-    # ---- مرحله 2: اجرای اسکریپت ----
     print("======================================")
     print(" EXECUTING STEP 2: RUN SCRIPT")
     print("======================================")
@@ -878,13 +868,12 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=payload2,
-            timeout=300  # --max-time 300
+            timeout=300
         )
     except requests.RequestException as e:
         print(f"ERROR: Step 2 request failed: {e}")
         sys.exit(1)
 
-    # گزارش مرحله 2
     print()
     print("=== STEP 2 RESULT ===")
     print(f"Status code: {response2.status_code}")
@@ -896,7 +885,6 @@ if endpoint and token_value:
     print("=====================")
     print()
 
-    # ---- چاپ خلاصه‌ی هر دو درخواست (برای مرجع) ----
     print("======================================")
     print(" SUMMARY OF REQUESTS SENT")
     print("======================================")
@@ -924,7 +912,7 @@ else:
 
 
 # ============================================================
-# 2I. DELETE logs.txt ONLY AFTER SUCCESSFUL MATCH
+# 2I. DELETE logs.txt FROM GITHUB
 # ============================================================
 
 if endpoint and token_value:
@@ -967,6 +955,98 @@ else:
     print("======================================")
     print("Because Endpoint and Token were not both found,")
     print("logs.txt was NOT deleted.")
+
+
+# ============================================================
+# 2J. CANCEL SERVER (SEND CANCEL COMMAND)
+# ============================================================
+
+if endpoint and token_value:
+    print("======================================")
+    print(" CANCELLING SERVER")
+    print("======================================")
+
+    cancel_payload = {
+        "command": "cancel"
+    }
+
+    try:
+        cancel_response = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {token_value}",
+                "Content-Type": "application/json"
+            },
+            json=cancel_payload,
+            timeout=30
+        )
+    except requests.RequestException as exc:
+        print(f"WARNING: Could not cancel server: {exc}")
+    else:
+        print(f"Cancel server status code: {cancel_response.status_code}")
+        if cancel_response.text:
+            print("Cancel server response:")
+            print(cancel_response.text.strip())
+        else:
+            print("Cancel server response: (empty)")
+else:
+    print("Cannot cancel server: endpoint or token missing.")
+
+
+# ============================================================
+# 2K. CANCEL GITHUB WORKFLOW RUN
+# ============================================================
+
+if run_id:
+    print("======================================")
+    print(" CANCELLING GITHUB WORKFLOW RUN")
+    print("======================================")
+
+    cancel_url = (
+        f"{GITHUB_API}/repos/"
+        f"{GITHUB_OWNER}/{GITHUB_REPO}/actions/runs/"
+        f"{run_id}/cancel"
+    )
+
+    try:
+        cancel_response = requests.post(
+            cancel_url,
+            headers=github_headers(),
+            timeout=30
+        )
+    except requests.RequestException as exc:
+        print(f"WARNING: Could not cancel workflow: {exc}")
+    else:
+        if cancel_response.status_code == 202:
+            print(f"Workflow run {run_id} cancelled successfully.")
+        else:
+            print(f"WARNING: Could not cancel workflow run {run_id}.")
+            print(f"HTTP: {cancel_response.status_code}")
+            print(f"Response: {cancel_response.text[:500]}")
+else:
+    print("No run_id available to cancel.")
+
+
+# ============================================================
+# 2L. REMOVE USED ADDRESSES FROM addresses.txt
+# ============================================================
+
+print("======================================")
+print(" REMOVING USED ADDRESSES")
+print("======================================")
+
+remaining_records = records[BATCH_SIZE:]
+
+if remaining_records:
+    with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
+        for rec in remaining_records:
+            f.write(f"{rec['index']}:{rec['address']}\n")
+    print(f"Removed {BATCH_SIZE} used addresses.")
+    print(f"Remaining addresses: {len(remaining_records)}")
+else:
+    with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
+        f.write("")
+    print("All addresses have been used. addresses.txt is now empty.")
 
 
 # ============================================================
