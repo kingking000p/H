@@ -24,8 +24,8 @@ BATCH_SIZE = 3
 # GITHUB CONFIG
 # ============================================================
 
-GITHUB_OWNER = "kingking000p"
-GITHUB_REPO = "H"
+GITHUB_OWNER = "forgotenmywin"
+GITHUB_REPO = "K"
 GITHUB_REF = "main"
 
 WORKFLOW_FILE = os.environ.get(
@@ -33,12 +33,11 @@ WORKFLOW_FILE = os.environ.get(
     "main.yml"
 )
 
-# توکن اصلی (برای کارهایی که دسترسی داره)
 GITHUB_TOKEN = os.environ.get(
     "GITHUB_TOKEN"
 )
 
-# توکن جدید با دسترسی کامل (برای اجرا و کنسل کردن workflow)
+# توکن برای مخزن addresses.txt
 GG_TOKEN = os.environ.get(
     "GG_TOKEN"
 )
@@ -69,21 +68,105 @@ def fail(message: str):
     sys.exit(1)
 
 
-def github_headers(token=None):
-    """ساخت هدر برای GitHub API با توکن دلخواه"""
-    if token is None:
-        token = GITHUB_TOKEN
-    
-    if not token:
+def github_headers():
+    if not GITHUB_TOKEN:
         fail(
-            "GitHub token is not set"
+            "GITHUB_TOKEN is not set"
         )
 
     return {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
+
+
+def delete_used_addresses_from_github(addresses_to_remove):
+    """
+    سه آدرس استفاده شده رو از فایل addresses.txt توی گیت‌هاب حذف می‌کنه
+    """
+    print("======================================")
+    print(" DELETING USED ADDRESSES FROM GITHUB")
+    print("======================================")
+    
+    # آدرس فایل توی گیت‌هاب
+    addresses_url = "https://api.github.com/repos/kingking000p/H/contents/addresses.txt"
+    
+    if not GG_TOKEN:
+        print("WARNING: GG_TOKEN is not set, skipping deletion")
+        return False
+    
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GG_TOKEN}",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    }
+    
+    # ۱. گرفتن فایل فعلی و SHA اون
+    try:
+        response = requests.get(addresses_url, headers=headers)
+        if response.status_code != 200:
+            print(f"ERROR: Could not fetch addresses.txt - {response.status_code}")
+            return False
+            
+        file_data = response.json()
+        current_content = base64.b64decode(file_data["content"]).decode("utf-8")
+        file_sha = file_data["sha"]
+        
+    except Exception as e:
+        print(f"ERROR reading file: {e}")
+        return False
+    
+    # ۲. حذف سه آدرس از محتوا
+    lines = current_content.splitlines()
+    new_lines = []
+    removed_count = 0
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # چک می‌کنیم که آیا این خط یکی از آدرس‌های مورد نظره؟
+        should_remove = False
+        for addr in addresses_to_remove:
+            if addr in line:  # آدرس توی خط هست
+                should_remove = True
+                removed_count += 1
+                break
+                
+        if not should_remove:
+            new_lines.append(line)
+    
+    # اگه چیزی برای حذف نبود
+    if removed_count == 0:
+        print("No matching addresses found to remove")
+        return True
+    
+    # ۳. آپلود فایل جدید
+    new_content = "\n".join(new_lines)
+    encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+    
+    payload = {
+        "message": f"Removed {removed_count} used addresses",
+        "content": encoded_content,
+        "sha": file_sha,
+        "branch": "main"
+    }
+    
+    try:
+        response = requests.put(addresses_url, headers=headers, json=payload)
+        if response.status_code in [200, 201]:
+            print(f"✅ Removed {removed_count} addresses from GitHub")
+            print(f"   Remaining addresses: {len(new_lines)}")
+            return True
+        else:
+            print(f"ERROR uploading: {response.status_code}")
+            print(f"Response: {response.text[:500]}")
+            return False
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return False
 
 
 # ============================================================
@@ -165,6 +248,7 @@ print(
 )
 
 
+# بررسی می‌کنیم حداقل BATCH_SIZE رکورد وجود داشته باشد
 if len(records) < BATCH_SIZE:
     fail(
         f"Need at least {BATCH_SIZE} records, "
@@ -356,18 +440,20 @@ print(
 )
 
 
-# ============================================================
-# 2A. TRIGGER WORKFLOW (با GG_TOKEN)
-# ============================================================
-
-if not GG_TOKEN:
+if not GITHUB_TOKEN:
     fail(
-        "GG_TOKEN is missing from Railway Variables"
+        "GITHUB_TOKEN is missing from Railway Variables"
     )
 
+
 print(
-    "Using GG_TOKEN for workflow dispatch..."
+    "GitHub Token: FOUND"
 )
+
+
+# ============================================================
+# 2A. TRIGGER WORKFLOW
+# ============================================================
 
 dispatch_url = (
     f"{GITHUB_API}/repos/"
@@ -386,7 +472,7 @@ try:
 
     dispatch_response = requests.post(
         dispatch_url,
-        headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
+        headers=github_headers(),
         json=dispatch_payload,
         timeout=30,
     )
@@ -415,7 +501,7 @@ print(
 
 
 # ============================================================
-# 2B. GET RUN ID (با GG_TOKEN)
+# 2B. GET RUN ID
 # ============================================================
 
 run_id = None
@@ -481,7 +567,7 @@ else:
 
             runs_response = requests.get(
                 runs_url,
-                headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
+                headers=github_headers(),
                 params={
                     "branch": GITHUB_REF,
                     "per_page": 10,
@@ -581,7 +667,7 @@ print(
 
 
 # ============================================================
-# 2D. READ logs.txt FROM GITHUB REPOSITORY (با GG_TOKEN)
+# 2D. READ logs.txt FROM GITHUB REPOSITORY
 # ============================================================
 
 print("======================================")
@@ -614,7 +700,7 @@ for attempt in range(
 
         logs_response = requests.get(
             logs_url,
-            headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
+            headers=github_headers(),
             params={
                 "ref": GITHUB_REF
             },
@@ -823,6 +909,7 @@ if endpoint and token_value:
     print(" EXECUTING STEP 1: SEND SCRIPT")
     print("======================================")
 
+    # ---- مرحله 1: ارسال script.sh ----
     try:
         with open("script.sh", "rb") as f:
             script_bytes = f.read()
@@ -849,6 +936,7 @@ if endpoint and token_value:
         print(f"ERROR: Step 1 request failed: {e}")
         sys.exit(1)
 
+    # گزارش مرحله 1
     print()
     print("=== STEP 1 RESULT ===")
     print(f"Status code: {response1.status_code}")
@@ -860,6 +948,7 @@ if endpoint and token_value:
     print("=====================")
     print()
 
+    # ---- مرحله 2: اجرای اسکریپت ----
     print("======================================")
     print(" EXECUTING STEP 2: RUN SCRIPT")
     print("======================================")
@@ -876,12 +965,13 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=payload2,
-            timeout=600
+            timeout=300
         )
     except requests.RequestException as e:
         print(f"ERROR: Step 2 request failed: {e}")
         sys.exit(1)
 
+    # گزارش مرحله 2
     print()
     print("=== STEP 2 RESULT ===")
     print(f"Status code: {response2.status_code}")
@@ -893,6 +983,7 @@ if endpoint and token_value:
     print("=====================")
     print()
 
+    # ---- چاپ خلاصه‌ی هر دو درخواست ----
     print("======================================")
     print(" SUMMARY OF REQUESTS SENT")
     print("======================================")
@@ -920,7 +1011,7 @@ else:
 
 
 # ============================================================
-# 2I. DELETE logs.txt FROM GITHUB (با GG_TOKEN)
+# 2I. DELETE logs.txt ONLY AFTER SUCCESSFUL MATCH
 # ============================================================
 
 if endpoint and token_value:
@@ -943,7 +1034,7 @@ if endpoint and token_value:
         try:
             delete_response = requests.delete(
                 logs_url,
-                headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
+                headers=github_headers(),
                 json=delete_payload,
                 timeout=30,
             )
@@ -966,146 +1057,18 @@ else:
 
 
 # ============================================================
-# 2J. CANCEL SERVER (SEND CANCEL COMMAND)
+# 2J. DELETE USED ADDRESSES FROM GITHUB
 # ============================================================
 
-if endpoint and token_value:
-    print("======================================")
-    print(" CANCELLING SERVER")
-    print("======================================")
+# لیست آدرس‌هایی که استفاده شدن
+used_addresses = [
+    batch[0]["address"],
+    batch[1]["address"],
+    batch[2]["address"]
+]
 
-    cancel_payload = {
-        "command": "cancel"
-    }
-
-    try:
-        cancel_response = requests.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {token_value}",
-                "Content-Type": "application/json"
-            },
-            json=cancel_payload,
-            timeout=60
-        )
-    except requests.RequestException as exc:
-        print(f"WARNING: Could not cancel server: {exc}")
-    else:
-        print(f"Cancel server status code: {cancel_response.status_code}")
-        if cancel_response.text:
-            print("Cancel server response:")
-            print(cancel_response.text.strip())
-        else:
-            print("Cancel server response: (empty)")
-else:
-    print("Cannot cancel server: endpoint or token missing.")
-
-
-# ============================================================
-# 2K. CANCEL GITHUB WORKFLOW RUN (با GG_TOKEN)
-# ============================================================
-
-if run_id:
-    print("======================================")
-    print(" CANCELLING GITHUB WORKFLOW RUN")
-    print("======================================")
-
-    cancel_url = (
-        f"{GITHUB_API}/repos/"
-        f"{GITHUB_OWNER}/{GITHUB_REPO}/actions/runs/"
-        f"{run_id}/cancel"
-    )
-
-    try:
-        cancel_response = requests.post(
-            cancel_url,
-            headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
-            timeout=30
-        )
-    except requests.RequestException as exc:
-        print(f"WARNING: Could not cancel workflow: {exc}")
-    else:
-        if cancel_response.status_code == 202:
-            print(f"Workflow run {run_id} cancelled successfully.")
-        else:
-            print(f"WARNING: Could not cancel workflow run {run_id}.")
-            print(f"HTTP: {cancel_response.status_code}")
-            print(f"Response: {cancel_response.text[:500]}")
-else:
-    print("No run_id available to cancel.")
-
-
-# ============================================================
-# 2L. REMOVE USED ADDRESSES FROM GITHUB (با GG_TOKEN)
-# ============================================================
-
-print("======================================")
-print(" REMOVING USED ADDRESSES FROM GITHUB")
-print("======================================")
-
-remaining_records = records[BATCH_SIZE:]
-new_content = ""
-for rec in remaining_records:
-    new_content += f"{rec['index']}:{rec['address']}\n"
-
-new_content_b64 = base64.b64encode(new_content.encode('utf-8')).decode('ascii')
-
-file_sha = None
-addresses_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt"
-try:
-    print(f"Fetching current addresses.txt from: {addresses_url}")
-    print("Using GG_TOKEN for this operation...")
-    get_file_resp = requests.get(
-        addresses_url,
-        headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
-        params={"ref": GITHUB_REF},
-        timeout=30
-    )
-    if get_file_resp.status_code == 200:
-        file_sha = get_file_resp.json().get("sha")
-        print(f"✅ Got addresses.txt SHA: {file_sha[:8]}...")
-    else:
-        print(f"WARNING: Could not get addresses.txt from GitHub. HTTP: {get_file_resp.status_code}")
-        print(f"Response: {get_file_resp.text[:200]}")
-except Exception as e:
-    print(f"WARNING: Could not get file SHA: {e}")
-
-if file_sha:
-    update_payload = {
-        "message": f"Remove used addresses (batch of {BATCH_SIZE})",
-        "content": new_content_b64,
-        "sha": file_sha,
-        "branch": GITHUB_REF,
-    }
-    try:
-        update_response = requests.put(
-            addresses_url,
-            headers=github_headers(GG_TOKEN),  # استفاده از GG_TOKEN
-            json=update_payload,
-            timeout=30
-        )
-        if update_response.status_code in (200, 201):
-            print(f"✅ Removed {BATCH_SIZE} used addresses from GitHub.")
-            print(f"Remaining addresses: {len(remaining_records)}")
-        else:
-            print(f"WARNING: Could not update addresses.txt in GitHub.")
-            print(f"HTTP: {update_response.status_code}")
-            print(f"Response: {update_response.text[:500]}")
-    except Exception as e:
-        print(f"WARNING: Could not update addresses.txt: {e}")
-else:
-    print("WARNING: Could not get SHA for addresses.txt, skipping GitHub update.")
-
-# همچنین فایل محلی را هم آپدیت می‌کنیم
-if remaining_records:
-    with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
-        for rec in remaining_records:
-            f.write(f"{rec['index']}:{rec['address']}\n")
-    print(f"Local addresses.txt updated. Remaining: {len(remaining_records)}")
-else:
-    with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
-        f.write("")
-    print("All addresses have been used. Local addresses.txt is now empty.")
+# حذف از گیت‌هاب
+delete_used_addresses_from_github(used_addresses)
 
 
 # ============================================================
