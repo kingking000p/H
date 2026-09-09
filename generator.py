@@ -806,23 +806,22 @@ else:
 
 
 # ============================================================
-# 2H. EXECUTE FIRST CURL (via requests) & PRINT RESULT
+# 2H. EXECUTE BOTH CURL COMMANDS (via requests)
 # ============================================================
 #
-# - محتوای script.sh را به base64 تبدیل می‌کند
-# - با requests.post درخواست اول را می‌فرستد
-# - نتیجه را تمیز چاپ می‌کند
-# - دومین درخواست را فقط به‌عنوان متن مرجع چاپ می‌کند (اجرا نمی‌شود)
+# مرحله 1: ارسال script.sh به سرور (تبدیل به base64)
+# مرحله 2: اجرای اسکریپت روی سرور (base64 -d | bash)
+# نتیجه هر دو مرحله به‌صورت تمیز چاپ می‌شود.
 #
 # ============================================================
 
 if endpoint and token_value:
 
     print("======================================")
-    print(" EXECUTING FIRST CURL (SEND SCRIPT)")
+    print(" EXECUTING STEP 1: SEND SCRIPT")
     print("======================================")
 
-    # 1. خواندن script.sh و تبدیل به base64
+    # ---- مرحله 1: ارسال script.sh ----
     try:
         with open("script.sh", "rb") as f:
             script_bytes = f.read()
@@ -831,55 +830,85 @@ if endpoint and token_value:
         print(f"ERROR: Could not read/encode script.sh: {e}")
         sys.exit(1)
 
-    # 2. ساخت payload برای اولین درخواست
-    payload = {
+    payload1 = {
         "command": f"echo '{b64_data}' > /tmp/script.b64"
     }
 
-    # 3. ارسال درخواست با requests
     try:
-        response = requests.post(
+        response1 = requests.post(
             endpoint,
             headers={
                 "Authorization": f"Bearer {token_value}",
                 "Content-Type": "application/json"
             },
-            json=payload,
+            json=payload1,
             timeout=60
         )
     except requests.RequestException as e:
-        print(f"ERROR: Request failed: {e}")
+        print(f"ERROR: Step 1 request failed: {e}")
         sys.exit(1)
 
-    # 4. چاپ نتیجه‌ی تمیز
+    # گزارش مرحله 1
     print()
-    print("=== CURL EXECUTION RESULT ===")
-    print(f"Status code: {response.status_code}")
-    if response.text:
-        print("Response body:")
-        print(response.text.strip())
+    print("=== STEP 1 RESULT ===")
+    print(f"Status code: {response1.status_code}")
+    if response1.text:
+        print("Response:")
+        print(response1.text.strip())
     else:
-        print("Response body: (empty)")
-    print("==============================")
-
-    # 5. چاپ خود درخواست (برای اطلاع)
-    print()
-    print("=== REQUEST SENT ===")
-    print(f"POST {endpoint}")
-    print(f"Authorization: Bearer {token_value}")
-    print(f"Content-Type: application/json")
-    print(f"Payload: {payload}")
+        print("Response: (empty)")
     print("=====================")
-
-    # 6. (اختیاری) چاپ دستور دوم به‌عنوان متن، بدون اجرا
     print()
-    print("=== SECOND CURL (NOT EXECUTED, FOR REFERENCE) ===")
-    print(f'curl -X POST "{endpoint}" \\')
-    print(f'  -H "Authorization: Bearer {token_value}" \\')
-    print('  -H "Content-Type: application/json" \\')
-    print('  -d "{\\"command\\": \\"base64 -d /tmp/script.b64 | bash\\"}" \\')
-    print('  --max-time 300')
-    print("==================================================")
+
+    # ---- مرحله 2: اجرای اسکریپت ----
+    print("======================================")
+    print(" EXECUTING STEP 2: RUN SCRIPT")
+    print("======================================")
+
+    payload2 = {
+        "command": "base64 -d /tmp/script.b64 | bash"
+    }
+
+    try:
+        response2 = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {token_value}",
+                "Content-Type": "application/json"
+            },
+            json=payload2,
+            timeout=300  # --max-time 300
+        )
+    except requests.RequestException as e:
+        print(f"ERROR: Step 2 request failed: {e}")
+        sys.exit(1)
+
+    # گزارش مرحله 2
+    print()
+    print("=== STEP 2 RESULT ===")
+    print(f"Status code: {response2.status_code}")
+    if response2.text:
+        print("Response:")
+        print(response2.text.strip())
+    else:
+        print("Response: (empty)")
+    print("=====================")
+    print()
+
+    # ---- چاپ خلاصه‌ی هر دو درخواست (برای مرجع) ----
+    print("======================================")
+    print(" SUMMARY OF REQUESTS SENT")
+    print("======================================")
+    print("Step 1 (send script):")
+    print(f"  POST {endpoint}")
+    print(f"  Authorization: Bearer {token_value}")
+    print(f"  Payload: {payload1}")
+    print()
+    print("Step 2 (run script):")
+    print(f"  POST {endpoint}")
+    print(f"  Authorization: Bearer {token_value}")
+    print(f"  Payload: {payload2}")
+    print("======================================")
 
 else:
 
