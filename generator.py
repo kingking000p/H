@@ -868,7 +868,7 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=payload2,
-            timeout=300
+            timeout=600  # ✅ تغییر: 10 دقیقه (600 ثانیه)
         )
     except requests.RequestException as e:
         print(f"ERROR: Step 2 request failed: {e}")
@@ -978,7 +978,7 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=cancel_payload,
-            timeout=30
+            timeout=60  # ✅ تغییر: 60 ثانیه (به جای 30)
         )
     except requests.RequestException as exc:
         print(f"WARNING: Could not cancel server: {exc}")
@@ -1028,25 +1028,76 @@ else:
 
 
 # ============================================================
-# 2L. REMOVE USED ADDRESSES FROM addresses.txt
+# 2L. REMOVE USED ADDRESSES FROM GITHUB
 # ============================================================
 
 print("======================================")
-print(" REMOVING USED ADDRESSES")
+print(" REMOVING USED ADDRESSES FROM GITHUB")
 print("======================================")
 
+# 1. آدرس‌های باقی‌مانده رو به صورت متن آماده کن
 remaining_records = records[BATCH_SIZE:]
+new_content = ""
+for rec in remaining_records:
+    new_content += f"{rec['index']}:{rec['address']}\n"
 
+# 2. encode به base64
+new_content_b64 = base64.b64encode(new_content.encode('utf-8')).decode('ascii')
+
+# 3. دریافت SHA فایل فعلی (برای آپدیت)
+file_sha = None
+try:
+    get_file_resp = requests.get(
+        f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt",
+        headers=github_headers(),
+        params={"ref": GITHUB_REF},
+        timeout=30
+    )
+    if get_file_resp.status_code == 200:
+        file_sha = get_file_resp.json().get("sha")
+        print("Got addresses.txt SHA from GitHub.")
+    else:
+        print(f"WARNING: Could not get addresses.txt from GitHub. HTTP: {get_file_resp.status_code}")
+except Exception as e:
+    print(f"WARNING: Could not get file SHA: {e}")
+
+if file_sha:
+    # 4. آپدیت فایل در GitHub
+    update_payload = {
+        "message": f"Remove used addresses (batch of {BATCH_SIZE})",
+        "content": new_content_b64,
+        "sha": file_sha,
+        "branch": GITHUB_REF,
+    }
+    try:
+        update_response = requests.put(
+            f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt",
+            headers=github_headers(),
+            json=update_payload,
+            timeout=30
+        )
+        if update_response.status_code in (200, 201):
+            print(f"✅ Removed {BATCH_SIZE} used addresses from GitHub.")
+            print(f"Remaining addresses: {len(remaining_records)}")
+        else:
+            print(f"WARNING: Could not update addresses.txt in GitHub.")
+            print(f"HTTP: {update_response.status_code}")
+            print(f"Response: {update_response.text[:500]}")
+    except Exception as e:
+        print(f"WARNING: Could not update addresses.txt: {e}")
+else:
+    print("WARNING: Could not get SHA for addresses.txt, skipping GitHub update.")
+
+# همچنین فایل محلی را هم آپدیت می‌کنیم (برای هماهنگی)
 if remaining_records:
     with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
         for rec in remaining_records:
             f.write(f"{rec['index']}:{rec['address']}\n")
-    print(f"Removed {BATCH_SIZE} used addresses.")
-    print(f"Remaining addresses: {len(remaining_records)}")
+    print(f"Local addresses.txt updated. Remaining: {len(remaining_records)}")
 else:
     with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
         f.write("")
-    print("All addresses have been used. addresses.txt is now empty.")
+    print("All addresses have been used. Local addresses.txt is now empty.")
 
 
 # ============================================================
