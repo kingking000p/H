@@ -21,11 +21,11 @@ OUTPUT_FILE = BASE_DIR / "script.sh"
 BATCH_SIZE = 3
 
 # ============================================================
-# GITHUB CONFIG ✅ اصلاح‌شده
+# GITHUB CONFIG
 # ============================================================
 
-GITHUB_OWNER = "kingking000p"      # ✅ اصلاح شد
-GITHUB_REPO = "H"                  # ✅ اصلاح شد
+GITHUB_OWNER = "kingking000p"
+GITHUB_REPO = "H"
 GITHUB_REF = "main"
 
 WORKFLOW_FILE = os.environ.get(
@@ -33,8 +33,14 @@ WORKFLOW_FILE = os.environ.get(
     "main.yml"
 )
 
+# توکن اصلی برای اجرا و کنسل کردن workflow
 GITHUB_TOKEN = os.environ.get(
     "GITHUB_TOKEN"
+)
+
+# توکن جدید فقط برای حذف addresses.txt
+GG_TOKEN = os.environ.get(
+    "GG_TOKEN"
 )
 
 GITHUB_API = "https://api.github.com"
@@ -63,15 +69,19 @@ def fail(message: str):
     sys.exit(1)
 
 
-def github_headers():
-    if not GITHUB_TOKEN:
+def github_headers(token=None):
+    """ساخت هدر برای GitHub API با توکن دلخواه"""
+    if token is None:
+        token = GITHUB_TOKEN
+    
+    if not token:
         fail(
-            "GITHUB_TOKEN is not set"
+            "GitHub token is not set"
         )
 
     return {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
 
@@ -378,7 +388,7 @@ try:
 
     dispatch_response = requests.post(
         dispatch_url,
-        headers=github_headers(),
+        headers=github_headers(),  # از توکن اصلی استفاده می‌کنه
         json=dispatch_payload,
         timeout=30,
     )
@@ -473,7 +483,7 @@ else:
 
             runs_response = requests.get(
                 runs_url,
-                headers=github_headers(),
+                headers=github_headers(),  # از توکن اصلی استفاده می‌کنه
                 params={
                     "branch": GITHUB_REF,
                     "per_page": 10,
@@ -606,7 +616,7 @@ for attempt in range(
 
         logs_response = requests.get(
             logs_url,
-            headers=github_headers(),
+            headers=github_headers(),  # از توکن اصلی استفاده می‌کنه
             params={
                 "ref": GITHUB_REF
             },
@@ -912,7 +922,7 @@ else:
 
 
 # ============================================================
-# 2I. DELETE logs.txt FROM GITHUB
+# 2I. DELETE logs.txt FROM GITHUB (با توکن اصلی)
 # ============================================================
 
 if endpoint and token_value:
@@ -935,7 +945,7 @@ if endpoint and token_value:
         try:
             delete_response = requests.delete(
                 logs_url,
-                headers=github_headers(),
+                headers=github_headers(),  # از توکن اصلی استفاده می‌کنه
                 json=delete_payload,
                 timeout=30,
             )
@@ -994,7 +1004,7 @@ else:
 
 
 # ============================================================
-# 2K. CANCEL GITHUB WORKFLOW RUN
+# 2K. CANCEL GITHUB WORKFLOW RUN (با توکن اصلی)
 # ============================================================
 
 if run_id:
@@ -1011,7 +1021,7 @@ if run_id:
     try:
         cancel_response = requests.post(
             cancel_url,
-            headers=github_headers(),
+            headers=github_headers(),  # از توکن اصلی استفاده می‌کنه
             timeout=30
         )
     except requests.RequestException as exc:
@@ -1028,70 +1038,76 @@ else:
 
 
 # ============================================================
-# 2L. REMOVE USED ADDRESSES FROM GITHUB
+# 2L. REMOVE USED ADDRESSES FROM GITHUB (با GG_TOKEN)
 # ============================================================
 
 print("======================================")
 print(" REMOVING USED ADDRESSES FROM GITHUB")
 print("======================================")
 
-# 1. آدرس‌های باقی‌مانده رو به صورت متن آماده کن
-remaining_records = records[BATCH_SIZE:]
-new_content = ""
-for rec in remaining_records:
-    new_content += f"{rec['index']}:{rec['address']}\n"
+# چک کردن وجود GG_TOKEN
+if not GG_TOKEN:
+    print("WARNING: GG_TOKEN is not set. Skipping GitHub addresses update.")
+else:
+    # 1. آدرس‌های باقی‌مانده رو به صورت متن آماده کن
+    remaining_records = records[BATCH_SIZE:]
+    new_content = ""
+    for rec in remaining_records:
+        new_content += f"{rec['index']}:{rec['address']}\n"
 
-# 2. encode به base64
-new_content_b64 = base64.b64encode(new_content.encode('utf-8')).decode('ascii')
+    # 2. encode به base64
+    new_content_b64 = base64.b64encode(new_content.encode('utf-8')).decode('ascii')
 
-# 3. دریافت SHA فایل فعلی (برای آپدیت)
-file_sha = None
-addresses_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt"
-try:
-    print(f"Fetching current addresses.txt from: {addresses_url}")
-    get_file_resp = requests.get(
-        addresses_url,
-        headers=github_headers(),
-        params={"ref": GITHUB_REF},
-        timeout=30
-    )
-    if get_file_resp.status_code == 200:
-        file_sha = get_file_resp.json().get("sha")
-        print(f"✅ Got addresses.txt SHA: {file_sha[:8]}...")
-    else:
-        print(f"WARNING: Could not get addresses.txt from GitHub. HTTP: {get_file_resp.status_code}")
-        print(f"Response: {get_file_resp.text[:200]}")
-except Exception as e:
-    print(f"WARNING: Could not get file SHA: {e}")
-
-if file_sha:
-    # 4. آپدیت فایل در GitHub
-    update_payload = {
-        "message": f"Remove used addresses (batch of {BATCH_SIZE})",
-        "content": new_content_b64,
-        "sha": file_sha,
-        "branch": GITHUB_REF,
-    }
+    # 3. دریافت SHA فایل فعلی (برای آپدیت) با GG_TOKEN
+    file_sha = None
+    addresses_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/addresses.txt"
     try:
-        update_response = requests.put(
+        print(f"Fetching current addresses.txt from: {addresses_url}")
+        print("Using GG_TOKEN for this operation...")
+        get_file_resp = requests.get(
             addresses_url,
-            headers=github_headers(),
-            json=update_payload,
+            headers=github_headers(GG_TOKEN),  # از توکن جدید استفاده می‌کنه
+            params={"ref": GITHUB_REF},
             timeout=30
         )
-        if update_response.status_code in (200, 201):
-            print(f"✅ Removed {BATCH_SIZE} used addresses from GitHub.")
-            print(f"Remaining addresses: {len(remaining_records)}")
+        if get_file_resp.status_code == 200:
+            file_sha = get_file_resp.json().get("sha")
+            print(f"✅ Got addresses.txt SHA: {file_sha[:8]}...")
         else:
-            print(f"WARNING: Could not update addresses.txt in GitHub.")
-            print(f"HTTP: {update_response.status_code}")
-            print(f"Response: {update_response.text[:500]}")
+            print(f"WARNING: Could not get addresses.txt from GitHub. HTTP: {get_file_resp.status_code}")
+            print(f"Response: {get_file_resp.text[:200]}")
     except Exception as e:
-        print(f"WARNING: Could not update addresses.txt: {e}")
-else:
-    print("WARNING: Could not get SHA for addresses.txt, skipping GitHub update.")
+        print(f"WARNING: Could not get file SHA: {e}")
+
+    if file_sha:
+        # 4. آپدیت فایل در GitHub با GG_TOKEN
+        update_payload = {
+            "message": f"Remove used addresses (batch of {BATCH_SIZE})",
+            "content": new_content_b64,
+            "sha": file_sha,
+            "branch": GITHUB_REF,
+        }
+        try:
+            update_response = requests.put(
+                addresses_url,
+                headers=github_headers(GG_TOKEN),  # از توکن جدید استفاده می‌کنه
+                json=update_payload,
+                timeout=30
+            )
+            if update_response.status_code in (200, 201):
+                print(f"✅ Removed {BATCH_SIZE} used addresses from GitHub.")
+                print(f"Remaining addresses: {len(remaining_records)}")
+            else:
+                print(f"WARNING: Could not update addresses.txt in GitHub.")
+                print(f"HTTP: {update_response.status_code}")
+                print(f"Response: {update_response.text[:500]}")
+        except Exception as e:
+            print(f"WARNING: Could not update addresses.txt: {e}")
+    else:
+        print("WARNING: Could not get SHA for addresses.txt, skipping GitHub update.")
 
 # همچنین فایل محلی را هم آپدیت می‌کنیم (برای هماهنگی)
+remaining_records = records[BATCH_SIZE:]
 if remaining_records:
     with open(ADDRESSES_FILE, "w", encoding="utf-8") as f:
         for rec in remaining_records:
