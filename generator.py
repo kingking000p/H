@@ -6,6 +6,66 @@ import re
 import sys
 import base64
 import requests
+import datetime
+import json
+
+
+# ============================================================
+# LOGGING SETUP
+# ============================================================
+
+def log_info(message):
+    """چاپ پیام اطلاعات با timestamp"""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] [INFO] {message}")
+    sys.stdout.flush()  # 🔥 فلاش کردن خروجی
+
+
+def log_error(message):
+    """چاپ پیام خطا با timestamp"""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] [ERROR] {message}")
+    sys.stdout.flush()  # 🔥 فلاش کردن خروجی
+
+
+def log_debug(message):
+    """چاپ پیام دیباگ با timestamp"""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] [DEBUG] {message}")
+    sys.stdout.flush()  # 🔥 فلاش کردن خروجی
+
+
+def log_separator(char="=", length=38):
+    """چاپ خط جداکننده"""
+    log_info(char * length)
+
+
+def log_request_details(method, url, headers=None, payload=None, response=None):
+    """نمایش جزئیات کامل درخواست و پاسخ"""
+    log_debug(f"--- REQUEST DETAILS ---")
+    log_debug(f"Method: {method}")
+    log_debug(f"URL: {url}")
+    if headers:
+        # مخفی کردن توکن‌ها
+        safe_headers = headers.copy()
+        if "Authorization" in safe_headers:
+            auth = safe_headers["Authorization"]
+            if len(auth) > 20:
+                safe_headers["Authorization"] = auth[:15] + "..." + auth[-5:]
+        log_debug(f"Headers: {json.dumps(safe_headers, indent=2)}")
+    if payload:
+        # مخفی کردن اطلاعات حساس در payload
+        safe_payload = payload.copy()
+        if "command" in safe_payload and len(str(safe_payload["command"])) > 100:
+            safe_payload["command"] = str(safe_payload["command"])[:50] + "... (truncated)"
+        log_debug(f"Payload: {json.dumps(safe_payload, indent=2)}")
+    if response is not None:
+        log_debug(f"Response Status: {response.status_code}")
+        if response.text and len(response.text) < 500:
+            log_debug(f"Response Body: {response.text[:200]}...")
+        elif response.text:
+            log_debug(f"Response Body: {response.text[:200]}... (truncated)")
+    log_debug(f"--- END REQUEST ---")
 
 
 # ============================================================
@@ -62,38 +122,36 @@ LOG_RETRY_DELAY = 5
 # ============================================================
 
 def fail(message: str):
-    print()
-    print("ERROR:", message)
-    print()
+    log_error(message)
     sys.exit(1)
 
 
 def github_headers():
     if not GITHUB_TOKEN:
-        fail(
-            "GITHUB_TOKEN is not set"
-        )
+        fail("GITHUB_TOKEN is not set")
 
-    return {
+    headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
+    log_debug("GitHub headers created successfully")
+    return headers
 
 
 def delete_used_addresses_from_github(addresses_to_remove):
     """
     سه آدرس استفاده شده رو از فایل addresses.txt توی گیت‌هاب حذف می‌کنه
     """
-    print("======================================")
-    print(" DELETING USED ADDRESSES FROM GITHUB")
-    print("======================================")
+    log_separator()
+    log_info("DELETING USED ADDRESSES FROM GITHUB")
+    log_separator()
     
     # آدرس فایل توی گیت‌هاب
     addresses_url = "https://api.github.com/repos/kingking000p/H/contents/addresses.txt"
     
     if not GG_TOKEN:
-        print("WARNING: GG_TOKEN is not set, skipping deletion")
+        log_error("GG_TOKEN is not set, skipping deletion")
         return False
     
     headers = {
@@ -102,25 +160,34 @@ def delete_used_addresses_from_github(addresses_to_remove):
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
     
+    log_debug(f"Fetching addresses.txt from: {addresses_url}")
+    
     # ۱. گرفتن فایل فعلی و SHA اون
     try:
         response = requests.get(addresses_url, headers=headers)
+        log_request_details("GET", addresses_url, headers, response=response)
+        
         if response.status_code != 200:
-            print(f"ERROR: Could not fetch addresses.txt - {response.status_code}")
+            log_error(f"Could not fetch addresses.txt - {response.status_code}")
             return False
             
         file_data = response.json()
         current_content = base64.b64decode(file_data["content"]).decode("utf-8")
         file_sha = file_data["sha"]
         
+        log_debug(f"File SHA: {file_sha[:8]}...")
+        log_debug(f"Current content length: {len(current_content)} characters")
+        
     except Exception as e:
-        print(f"ERROR reading file: {e}")
+        log_error(f"Reading file error: {e}")
         return False
     
     # ۲. حذف سه آدرس از محتوا
     lines = current_content.splitlines()
     new_lines = []
     removed_count = 0
+    
+    log_debug(f"Processing {len(lines)} lines...")
     
     for line in lines:
         line = line.strip()
@@ -133,6 +200,7 @@ def delete_used_addresses_from_github(addresses_to_remove):
             if addr in line:  # آدرس توی خط هست
                 should_remove = True
                 removed_count += 1
+                log_debug(f"Removing address: {addr[:20]}...")
                 break
                 
         if not should_remove:
@@ -140,12 +208,15 @@ def delete_used_addresses_from_github(addresses_to_remove):
     
     # اگه چیزی برای حذف نبود
     if removed_count == 0:
-        print("No matching addresses found to remove")
+        log_info("No matching addresses found to remove")
         return True
     
     # ۳. آپلود فایل جدید
     new_content = "\n".join(new_lines)
     encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+    
+    log_debug(f"New content length: {len(new_content)} characters")
+    log_debug(f"Removed count: {removed_count}")
     
     payload = {
         "message": f"Removed {removed_count} used addresses",
@@ -154,18 +225,22 @@ def delete_used_addresses_from_github(addresses_to_remove):
         "branch": "main"
     }
     
+    log_debug(f"Uploading new file to: {addresses_url}")
+    
     try:
         response = requests.put(addresses_url, headers=headers, json=payload)
+        log_request_details("PUT", addresses_url, headers, payload, response)
+        
         if response.status_code in [200, 201]:
-            print(f"✅ Removed {removed_count} addresses from GitHub")
-            print(f"   Remaining addresses: {len(new_lines)}")
+            log_info(f"✅ Removed {removed_count} addresses from GitHub")
+            log_info(f"   Remaining addresses: {len(new_lines)}")
             return True
         else:
-            print(f"ERROR uploading: {response.status_code}")
-            print(f"Response: {response.text[:500]}")
+            log_error(f"Uploading failed: {response.status_code}")
+            log_error(f"Response: {response.text[:500]}")
             return False
     except Exception as e:
-        print(f"ERROR: {e}")
+        log_error(f"Upload error: {e}")
         return False
 
 
@@ -173,29 +248,31 @@ def delete_used_addresses_from_github(addresses_to_remove):
 # SECTION 1
 # ============================================================
 
-print("======================================")
-print(" FIRST BATCH GENERATOR")
-print("======================================")
+log_separator()
+log_info("FIRST BATCH GENERATOR")
+log_separator()
 
 
 # ------------------------------------------------------------
 # Check files
 # ------------------------------------------------------------
 
+log_debug(f"Checking files in: {BASE_DIR}")
+
 if not ADDRESSES_FILE.exists():
-    fail(
-        f"Missing file: {ADDRESSES_FILE}"
-    )
+    fail(f"Missing file: {ADDRESSES_FILE}")
 
 if not TEMPLATE_FILE.exists():
-    fail(
-        f"Missing file: {TEMPLATE_FILE}"
-    )
+    fail(f"Missing file: {TEMPLATE_FILE}")
+
+log_info(f"✅ All required files found")
 
 
 # ------------------------------------------------------------
 # Load addresses.txt
 # ------------------------------------------------------------
+
+log_debug(f"Loading addresses from: {ADDRESSES_FILE}")
 
 raw_lines = ADDRESSES_FILE.read_text(
     encoding="utf-8"
@@ -243,9 +320,7 @@ for line_no, raw in enumerate(
     })
 
 
-print(
-    f"Loaded records: {len(records)}"
-)
+log_info(f"Loaded records: {len(records)}")
 
 
 # بررسی می‌کنیم حداقل BATCH_SIZE رکورد وجود داشته باشد
@@ -260,13 +335,13 @@ if len(records) < BATCH_SIZE:
 # Load template
 # ------------------------------------------------------------
 
+log_debug(f"Loading template from: {TEMPLATE_FILE}")
+
 template = TEMPLATE_FILE.read_text(
     encoding="utf-8"
 )
 
-print(
-    "Loaded template: template.sh"
-)
+log_info("Loaded template: template.sh")
 
 
 # ------------------------------------------------------------
@@ -288,6 +363,8 @@ for placeholder in required_placeholders:
             f"Missing placeholder: {placeholder}"
         )
 
+log_debug("All placeholders verified")
+
 
 # ------------------------------------------------------------
 # First 3 records
@@ -301,28 +378,22 @@ if len(batch) != 3:
     )
 
 
-print("First batch:")
+log_info("First batch:")
 
 for pos, item in enumerate(
     batch,
     start=1
 ):
-    print(
-        f"  TARGET{pos}"
-    )
-
-    print(
-        f"    index:   {item['index']}"
-    )
-
-    print(
-        f"    address: {item['address']}"
-    )
+    log_info(f"  TARGET{pos}")
+    log_info(f"    index:   {item['index']}")
+    log_info(f"    address: {item['address']}")
 
 
 # ------------------------------------------------------------
 # Replace placeholders
 # ------------------------------------------------------------
+
+log_debug("Replacing placeholders in template...")
 
 generated = template
 
@@ -361,6 +432,8 @@ generated = generated.replace(
 # Write generated script
 # ------------------------------------------------------------
 
+log_debug(f"Writing generated script to: {OUTPUT_FILE}")
+
 OUTPUT_FILE.write_text(
     generated,
     encoding="utf-8"
@@ -371,89 +444,57 @@ OUTPUT_FILE.chmod(
 )
 
 
-print("======================================")
-print("GENERATED FILE")
-print("======================================")
+log_separator()
+log_info("GENERATED FILE")
+log_separator()
 
-print(
-    f"Output: {OUTPUT_FILE}"
-)
-
-print(
-    f"Size:   {OUTPUT_FILE.stat().st_size} bytes"
-)
+log_info(f"Output: {OUTPUT_FILE}")
+log_info(f"Size:   {OUTPUT_FILE.stat().st_size} bytes")
 
 
-print("======================================")
-print("GENERATED TARGETS")
-print("======================================")
+log_separator()
+log_info("GENERATED TARGETS")
+log_separator()
 
-print(
-    f"ADDRESS1 = {batch[0]['address']}"
-)
-
-print(
-    f"INDEX1   = {batch[0]['index']}"
-)
-
-print(
-    f"ADDRESS2 = {batch[1]['address']}"
-)
-
-print(
-    f"INDEX2   = {batch[1]['index']}"
-)
-
-print(
-    f"ADDRESS3 = {batch[2]['address']}"
-)
-
-print(
-    f"INDEX3   = {batch[2]['index']}"
-)
+log_info(f"ADDRESS1 = {batch[0]['address']}")
+log_info(f"INDEX1   = {batch[0]['index']}")
+log_info(f"ADDRESS2 = {batch[1]['address']}")
+log_info(f"INDEX2   = {batch[1]['index']}")
+log_info(f"ADDRESS3 = {batch[2]['address']}")
+log_info(f"INDEX3   = {batch[2]['index']}")
 
 
-print("======================================")
-print("SECTION 1 COMPLETE")
-print("======================================")
+log_separator()
+log_info("SECTION 1 COMPLETE")
+log_separator()
 
 
 # ============================================================
 # SECTION 2
 # ============================================================
 
-print("======================================")
-print(" SECTION 2 - GITHUB WORKFLOW")
-print("======================================")
+log_separator()
+log_info("SECTION 2 - GITHUB WORKFLOW")
+log_separator()
 
 
-print(
-    f"Repository : {GITHUB_OWNER}/{GITHUB_REPO}"
-)
-
-print(
-    f"Workflow   : {WORKFLOW_FILE}"
-)
-
-print(
-    f"Ref        : {GITHUB_REF}"
-)
+log_info(f"Repository : {GITHUB_OWNER}/{GITHUB_REPO}")
+log_info(f"Workflow   : {WORKFLOW_FILE}")
+log_info(f"Ref        : {GITHUB_REF}")
 
 
 if not GITHUB_TOKEN:
-    fail(
-        "GITHUB_TOKEN is missing from Railway Variables"
-    )
+    fail("GITHUB_TOKEN is missing from Railway Variables")
 
 
-print(
-    "GitHub Token: FOUND"
-)
+log_info("GitHub Token: FOUND")
 
 
 # ============================================================
 # 2A. TRIGGER WORKFLOW
 # ============================================================
+
+log_info("Triggering GitHub workflow...")
 
 dispatch_url = (
     f"{GITHUB_API}/repos/"
@@ -467,27 +508,24 @@ dispatch_payload = {
     "return_run_details": True,
 }
 
+log_debug(f"Dispatch URL: {dispatch_url}")
+log_debug(f"Payload: {json.dumps(dispatch_payload)}")
+
 
 try:
-
     dispatch_response = requests.post(
         dispatch_url,
         headers=github_headers(),
         json=dispatch_payload,
         timeout=30,
     )
+    log_request_details("POST", dispatch_url, github_headers(), dispatch_payload, dispatch_response)
 
 except requests.RequestException as exc:
-
-    fail(
-        f"Workflow dispatch request failed: {exc}"
-    )
+    fail(f"Workflow dispatch request failed: {exc}")
 
 
-if dispatch_response.status_code not in (
-    200,
-    204,
-):
+if dispatch_response.status_code not in (200, 204):
     fail(
         "Workflow dispatch failed\n"
         f"HTTP: {dispatch_response.status_code}\n"
@@ -495,14 +533,14 @@ if dispatch_response.status_code not in (
     )
 
 
-print(
-    "Workflow dispatch: SUCCESS"
-)
+log_info("Workflow dispatch: SUCCESS")
 
 
 # ============================================================
 # 2B. GET RUN ID
 # ============================================================
+
+log_debug("Getting workflow run ID...")
 
 run_id = None
 
@@ -510,33 +548,16 @@ run_id = None
 if dispatch_response.status_code == 200:
 
     try:
-
-        dispatch_json = (
-            dispatch_response.json()
-        )
-
+        dispatch_json = dispatch_response.json()
     except ValueError:
+        fail("GitHub returned HTTP 200 but response was not JSON")
 
-        fail(
-            "GitHub returned HTTP 200 "
-            "but response was not JSON"
-        )
-
-    run_id = dispatch_json.get(
-        "workflow_run_id"
-    )
+    run_id = dispatch_json.get("workflow_run_id")
 
     if run_id:
-
-        print(
-            f"Workflow Run ID: {run_id}"
-        )
-
+        log_info(f"Workflow Run ID: {run_id}")
     else:
-
-        print(
-            "Workflow Run ID: not returned"
-        )
+        log_error("Workflow Run ID: not returned")
 
 
 else:
@@ -545,13 +566,7 @@ else:
     # Fallback for HTTP 204
     # --------------------------------------------------------
 
-    print(
-        "Dispatch returned 204."
-    )
-
-    print(
-        "Finding newest workflow run..."
-    )
+    log_info("Dispatch returned 204. Finding newest workflow run...")
 
     runs_url = (
         f"{GITHUB_API}/repos/"
@@ -564,7 +579,6 @@ else:
     while time.time() < deadline:
 
         try:
-
             runs_response = requests.get(
                 runs_url,
                 headers=github_headers(),
@@ -574,105 +588,56 @@ else:
                 },
                 timeout=30,
             )
-
         except requests.RequestException:
-
             time.sleep(2)
             continue
 
-
         if runs_response.status_code == 200:
-
             try:
-
-                runs_json = (
-                    runs_response.json()
-                )
-
+                runs_json = runs_response.json()
             except ValueError:
-
                 time.sleep(2)
                 continue
 
-
-            workflow_runs = (
-                runs_json.get(
-                    "workflow_runs",
-                    []
-                )
-            )
-
+            workflow_runs = runs_json.get("workflow_runs", [])
 
             if workflow_runs:
-
-                run_id = (
-                    workflow_runs[0].get(
-                        "id"
-                    )
-                )
-
+                run_id = workflow_runs[0].get("id")
                 if run_id:
                     break
 
-
         time.sleep(2)
 
-
     if run_id:
-
-        print(
-            f"Workflow Run ID: {run_id}"
-        )
-
+        log_info(f"Workflow Run ID: {run_id}")
     else:
-
-        print(
-            "Workflow Run ID: not found"
-        )
+        log_error("Workflow Run ID: not found")
 
 
 # ============================================================
 # 2C. WAIT 60 SECONDS
 # ============================================================
 
-print(
-    "Waiting 60 seconds for logs.txt..."
-)
-
+log_info("Waiting 60 seconds for logs.txt...")
 
 remaining = INITIAL_WAIT_SECONDS
 
-
 while remaining > 0:
-
-    print(
-        f"  {remaining} seconds remaining..."
-    )
-
-    sleep_for = min(
-        10,
-        remaining
-    )
-
-    time.sleep(
-        sleep_for
-    )
-
+    log_info(f"  {remaining} seconds remaining...")
+    sleep_for = min(10, remaining)
+    time.sleep(sleep_for)
     remaining -= sleep_for
 
-
-print(
-    "60 seconds completed."
-)
+log_info("60 seconds completed.")
 
 
 # ============================================================
 # 2D. READ logs.txt FROM GITHUB REPOSITORY
 # ============================================================
 
-print("======================================")
-print(" READING logs.txt")
-print("======================================")
+log_separator()
+log_info("READING logs.txt")
+log_separator()
 
 
 logs_url = (
@@ -681,102 +646,49 @@ logs_url = (
     f"{LOG_FILE_PATH}"
 )
 
+log_debug(f"Logs URL: {logs_url}")
 
 logs_json = None
 
+for attempt in range(1, LOG_RETRY_COUNT + 1):
 
-for attempt in range(
-    1,
-    LOG_RETRY_COUNT + 1
-):
-
-    print(
-        f"Checking logs.txt "
-        f"(attempt {attempt}/{LOG_RETRY_COUNT})..."
-    )
-
+    log_info(f"Checking logs.txt (attempt {attempt}/{LOG_RETRY_COUNT})...")
 
     try:
-
         logs_response = requests.get(
             logs_url,
             headers=github_headers(),
-            params={
-                "ref": GITHUB_REF
-            },
+            params={"ref": GITHUB_REF},
             timeout=30,
         )
-
     except requests.RequestException as exc:
-
-        print(
-            f"Request error: {exc}"
-        )
-
+        log_error(f"Request error: {exc}")
         if attempt < LOG_RETRY_COUNT:
-
-            time.sleep(
-                LOG_RETRY_DELAY
-            )
-
+            time.sleep(LOG_RETRY_DELAY)
         continue
 
-
     if logs_response.status_code == 200:
-
         try:
-
-            logs_json = (
-                logs_response.json()
-            )
-
+            logs_json = logs_response.json()
         except ValueError:
-
-            print(
-                "Invalid JSON response."
-            )
-
+            log_error("Invalid JSON response.")
             if attempt < LOG_RETRY_COUNT:
-
-                time.sleep(
-                    LOG_RETRY_DELAY
-                )
-
+                time.sleep(LOG_RETRY_DELAY)
             continue
-
         break
 
-
     if logs_response.status_code == 404:
-
-        print(
-            "logs.txt not found yet."
-        )
-
+        log_error("logs.txt not found yet.")
     else:
-
-        print(
-            f"GitHub HTTP "
-            f"{logs_response.status_code}"
-        )
-
-        print(
-            logs_response.text[:500]
-        )
-
+        log_error(f"GitHub HTTP {logs_response.status_code}")
+        log_debug(logs_response.text[:500])
 
     if attempt < LOG_RETRY_COUNT:
-
-        time.sleep(
-            LOG_RETRY_DELAY
-        )
+        time.sleep(LOG_RETRY_DELAY)
 
 
 if logs_json is None:
-
-    fail(
-        "Could not retrieve logs.txt"
-    )
+    fail("Could not retrieve logs.txt")
 
 
 # ============================================================
@@ -784,49 +696,26 @@ if logs_json is None:
 # ============================================================
 
 if logs_json.get("type") != "file":
+    fail("logs.txt is not a regular file")
 
-    fail(
-        "logs.txt is not a regular file"
-    )
-
-
-encoded_content = logs_json.get(
-    "content"
-)
-
+encoded_content = logs_json.get("content")
 
 if not encoded_content:
-
-    fail(
-        "logs.txt has no content"
-    )
-
+    fail("logs.txt has no content")
 
 try:
-
-    logs_text = base64.b64decode(
-        encoded_content
-    ).decode(
-        "utf-8",
-        errors="replace"
-    )
-
+    logs_text = base64.b64decode(encoded_content).decode("utf-8", errors="replace")
 except Exception as exc:
+    fail(f"Could not decode logs.txt: {exc}")
 
-    fail(
-        f"Could not decode logs.txt: {exc}"
-    )
-
-
-print(
-    f"logs.txt loaded: "
-    f"{len(logs_text)} characters"
-)
+log_info(f"logs.txt loaded: {len(logs_text)} characters")
 
 
 # ============================================================
 # 2F. FIND REMOTE_URL
 # ============================================================
+
+log_debug("Searching for REMOTE_URL in logs...")
 
 remote_url_match = re.search(
     r"(?m)^\s*REMOTE_URL\s*=\s*(https://[^\s]+)\s*$",
@@ -838,15 +727,17 @@ remote_url_match = re.search(
 # 2G. FIND API_TOKEN
 # ============================================================
 
+log_debug("Searching for API_TOKEN in logs...")
+
 api_token_match = re.search(
     r"(?m)^\s*API_TOKEN\s*=\s*([A-Za-z0-9_-]{20,})\s*$",
     logs_text
 )
 
 
-print("======================================")
-print(" LOG SEARCH RESULTS")
-print("======================================")
+log_separator()
+log_info("LOG SEARCH RESULTS")
+log_separator()
 
 
 # ------------------------------------------------------------
@@ -855,32 +746,19 @@ print("======================================")
 
 if remote_url_match:
 
-    remote_url = (
-        remote_url_match.group(1)
-        .strip()
-    )
+    remote_url = remote_url_match.group(1).strip()
 
-    endpoint = (
-        remote_url.rstrip("/")
-        + "/command"
-    )
+    endpoint = remote_url.rstrip("/") + "/command"
 
-    print(
-        "Endpoint: FOUND"
-    )
-
-    print(
-        f"Endpoint URL: {endpoint}"
-    )
+    log_info("Endpoint: FOUND")
+    log_info(f"Endpoint URL: {endpoint}")
 
 else:
 
     remote_url = None
     endpoint = None
 
-    print(
-        "Endpoint: NOT FOUND"
-    )
+    log_error("Endpoint: NOT FOUND")
 
 
 # ------------------------------------------------------------
@@ -889,14 +767,11 @@ else:
 
 if api_token_match:
     token_value = api_token_match.group(1).strip()
-    print(
-        "Token: FOUND"
-    )
+    log_info("Token: FOUND")
+    log_debug(f"Token: {token_value[:10]}...{token_value[-5:]}")
 else:
     token_value = None
-    print(
-        "Token: NOT FOUND"
-    )
+    log_error("Token: NOT FOUND")
 
 
 # ============================================================
@@ -905,17 +780,18 @@ else:
 
 if endpoint and token_value:
 
-    print("======================================")
-    print(" EXECUTING STEP 1: SEND SCRIPT")
-    print("======================================")
+    log_separator()
+    log_info("EXECUTING STEP 1: SEND SCRIPT")
+    log_separator()
 
     # ---- مرحله 1: ارسال script.sh ----
     try:
         with open("script.sh", "rb") as f:
             script_bytes = f.read()
         b64_data = base64.b64encode(script_bytes).decode('ascii')
+        log_debug(f"Script encoded: {len(b64_data)} characters")
     except Exception as e:
-        print(f"ERROR: Could not read/encode script.sh: {e}")
+        log_error(f"Could not read/encode script.sh: {e}")
         sys.exit(1)
 
     payload1 = {
@@ -923,6 +799,7 @@ if endpoint and token_value:
     }
 
     try:
+        log_debug(f"Sending script to: {endpoint}")
         response1 = requests.post(
             endpoint,
             headers={
@@ -932,30 +809,33 @@ if endpoint and token_value:
             json=payload1,
             timeout=60
         )
+        log_request_details("POST", endpoint, {"Authorization": f"Bearer {token_value[:10]}..."}, payload1, response1)
     except requests.RequestException as e:
-        print(f"ERROR: Step 1 request failed: {e}")
+        log_error(f"Step 1 request failed: {e}")
         sys.exit(1)
 
     # گزارش مرحله 1
-    print()
-    print("=== STEP 1 RESULT ===")
-    print(f"Status code: {response1.status_code}")
+    log_info("=== STEP 1 RESULT ===")
+    log_info(f"Status code: {response1.status_code}")
     if response1.text:
-        print("Response:")
-        print(response1.text.strip())
+        log_info("Response:")
+        log_info(response1.text.strip())
     else:
-        print("Response: (empty)")
-    print("=====================")
-    print()
+        log_info("Response: (empty)")
+    log_info("=====================")
 
-    # ---- مرحله 2: اجرای اسکریپت ----
-    print("======================================")
-    print(" EXECUTING STEP 2: RUN SCRIPT")
-    print("======================================")
+    # ---- مرحله 2: اجرای اسکریپت (با timeout 600 ثانیه = ۱۰ دقیقه) ----
+    log_separator()
+    log_info("EXECUTING STEP 2: RUN SCRIPT")
+    log_separator()
+    log_info("⏱️ Timeout set to 600 seconds (10 minutes)")
+    log_info("⏳ Waiting for script execution... (this may take a while)")
 
     payload2 = {
         "command": "base64 -d /tmp/script.b64 | bash"
     }
+
+    start_time = time.time()
 
     try:
         response2 = requests.post(
@@ -965,49 +845,51 @@ if endpoint and token_value:
                 "Content-Type": "application/json"
             },
             json=payload2,
-            timeout=300
+            timeout=600  # 🔥 ۱۰ دقیقه
         )
     except requests.RequestException as e:
-        print(f"ERROR: Step 2 request failed: {e}")
+        log_error(f"Step 2 request failed: {e}")
         sys.exit(1)
 
+    elapsed_time = time.time() - start_time
+    log_info(f"⏱️ Execution time: {elapsed_time:.2f} seconds")
+
     # گزارش مرحله 2
-    print()
-    print("=== STEP 2 RESULT ===")
-    print(f"Status code: {response2.status_code}")
+    log_info("=== STEP 2 RESULT ===")
+    log_info(f"Status code: {response2.status_code}")
     if response2.text:
-        print("Response:")
-        print(response2.text.strip())
+        log_info("Response:")
+        log_info(response2.text.strip())
     else:
-        print("Response: (empty)")
-    print("=====================")
-    print()
+        log_info("Response: (empty)")
+    log_info("=====================")
 
     # ---- چاپ خلاصه‌ی هر دو درخواست ----
-    print("======================================")
-    print(" SUMMARY OF REQUESTS SENT")
-    print("======================================")
-    print("Step 1 (send script):")
-    print(f"  POST {endpoint}")
-    print(f"  Authorization: Bearer {token_value}")
-    print(f"  Payload: {payload1}")
-    print()
-    print("Step 2 (run script):")
-    print(f"  POST {endpoint}")
-    print(f"  Authorization: Bearer {token_value}")
-    print(f"  Payload: {payload2}")
-    print("======================================")
+    log_separator()
+    log_info("SUMMARY OF REQUESTS SENT")
+    log_separator()
+    log_info("Step 1 (send script):")
+    log_info(f"  POST {endpoint}")
+    log_info(f"  Authorization: Bearer {token_value[:10]}...{token_value[-5:]}")
+    log_info(f"  Payload: {payload1}")
+    log_info("")
+    log_info("Step 2 (run script):")
+    log_info(f"  POST {endpoint}")
+    log_info(f"  Authorization: Bearer {token_value[:10]}...{token_value[-5:]}")
+    log_info(f"  Payload: {payload2}")
+    log_info(f"  Timeout: 600 seconds")
+    log_separator()
 
 else:
 
-    print("======================================")
-    print(" SECTION 2 FAILED")
-    print("======================================")
+    log_separator()
+    log_error("SECTION 2 FAILED")
+    log_separator()
 
     if not endpoint:
-        print("Reason: REMOTE_URL was not found.")
+        log_error("Reason: REMOTE_URL was not found.")
     if not token_value:
-        print("Reason: API_TOKEN was not found.")
+        log_error("Reason: API_TOKEN was not found.")
 
 
 # ============================================================
@@ -1016,14 +898,14 @@ else:
 
 if endpoint and token_value:
 
-    print("======================================")
-    print(" DELETING logs.txt")
-    print("======================================")
+    log_separator()
+    log_info("DELETING logs.txt")
+    log_separator()
 
     file_sha = logs_json.get("sha")
 
     if not file_sha:
-        print("WARNING: logs.txt SHA not found.")
+        log_error("WARNING: logs.txt SHA not found.")
     else:
         delete_payload = {
             "message": "Delete temporary logs.txt",
@@ -1038,22 +920,22 @@ if endpoint and token_value:
                 json=delete_payload,
                 timeout=30,
             )
+            log_request_details("DELETE", logs_url, github_headers(), delete_payload, delete_response)
         except requests.RequestException as exc:
-            print(f"WARNING: Could not delete logs.txt: {exc}")
+            log_error(f"WARNING: Could not delete logs.txt: {exc}")
         else:
             if delete_response.status_code == 200:
-                print("logs.txt deleted successfully.")
+                log_info("✅ logs.txt deleted successfully.")
             else:
-                print("WARNING: Could not delete logs.txt.")
-                print(f"HTTP: {delete_response.status_code}")
+                log_error(f"WARNING: Could not delete logs.txt. HTTP: {delete_response.status_code}")
 
 else:
 
-    print("======================================")
-    print(" logs.txt KEPT FOR DEBUGGING")
-    print("======================================")
-    print("Because Endpoint and Token were not both found,")
-    print("logs.txt was NOT deleted.")
+    log_separator()
+    log_info("logs.txt KEPT FOR DEBUGGING")
+    log_separator()
+    log_error("Because Endpoint and Token were not both found,")
+    log_error("logs.txt was NOT deleted.")
 
 
 # ============================================================
@@ -1075,11 +957,11 @@ delete_used_addresses_from_github(used_addresses)
 # FINAL
 # ============================================================
 
-print("======================================")
+log_separator()
 
 if endpoint and token_value:
-    print("SECTION 2 COMPLETE")
+    log_info("✅ SECTION 2 COMPLETE")
 else:
-    print("SECTION 2 FINISHED WITHOUT MATCH")
+    log_error("SECTION 2 FINISHED WITHOUT MATCH")
 
-print("======================================")
+log_separator()
