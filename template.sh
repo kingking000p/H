@@ -10,7 +10,7 @@ import nanopy
 # 👇👇👇 Enter only these seven variables 👇👇👇
 # ============================================================
 
-SEED = 'fshfesiu'
+SEED = '673754a71ff81f5d7dc9c4d1f2e3acd996df945794e4de4c34e0ea4cc2861234'
 ADDRESS1 = '__ADDRESS1__'
 INDEX1  = __INDEX1__
 
