@@ -806,20 +806,15 @@ else:
 
 
 # ============================================================
-# 2H. PRINT CURL COMMANDS WITH REAL TOKEN
+# 2H. PRINT CURL COMMANDS WITH REAL TOKEN (CLEAN)
 # ============================================================
 #
-# IMPORTANT:
-# فقط چاپ می‌شوند، اجرا نمی‌شوند.
-# توکن واقعی در خروجی نمایش داده می‌شود.
+# فقط دستورات curl با توکن واقعی چاپ می‌شوند.
+# هیچ پیام اضافه‌ای چاپ نمی‌شود.
 #
 # ============================================================
 
 if endpoint and token_value:
-
-    print("======================================")
-    print(" FOUND — CURL COMMANDS WITH REAL TOKEN")
-    print("======================================")
 
     print()
     print("B64=$(base64 -w0 script.sh)")
@@ -857,10 +852,6 @@ if endpoint and token_value:
     )
 
     print()
-    print("NOTE: CURL WAS NOT EXECUTED")
-    print("NOTE: script.sh WAS NOT EXECUTED")
-    print("======================================")
-
 
 else:
 
