@@ -155,9 +155,10 @@ print(
 )
 
 
-if len(records) != 102:
+# ✅ تغییر: فقط بررسی می‌کنیم حداقل BATCH_SIZE رکورد وجود داشته باشد
+if len(records) < BATCH_SIZE:
     fail(
-        f"Expected exactly 102 records, "
+        f"Need at least {BATCH_SIZE} records, "
         f"found {len(records)}"
     )
 
@@ -806,7 +807,7 @@ else:
 
 
 # ============================================================
-# 2H. EXECUTE BOTH CURL COMMANDS (via requests)
+# 2H. EXECUTE BOTH REQUESTS (via requests)
 # ============================================================
 #
 # مرحله 1: ارسال script.sh به سرور (تبدیل به base64)
