@@ -55,7 +55,7 @@ OUTPUT_FILE = BASE_DIR / "script.sh"
 
 BATCH_SIZE = 3
 MAX_ADDRESSES_TO_PROCESS = 30
-ENABLE_SEND_AND_RUN = True   # True = ارسال و اجرا | False = فقط گزارش
+ENABLE_SEND_AND_RUN = True
 BLACKLIST_FILE = BASE_DIR / "blacklist.txt"
 
 
@@ -125,77 +125,7 @@ def save_to_blacklist(addresses):
 
 
 # ============================================================
-# READ ENDPOINT CONFIGS FROM .txt FILES IN logs/ DIRECTORY
-# ============================================================
-
-def get_all_txt_files():
-    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
-    try:
-        response = requests.get(url, headers=github_headers(), timeout=30)
-        if response.status_code == 200:
-            files = response.json()
-            return [f for f in files if f["name"].endswith(".txt")]
-        else:
-            log_error(f"Could not list contents of {LOGS_DIR}: HTTP {response.status_code}")
-            return []
-    except Exception as e:
-        log_error(f"Error listing contents of {LOGS_DIR}: {e}")
-        return []
-
-
-def get_file_content(file_name):
-    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}/{file_name}"
-    try:
-        response = requests.get(url, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            encoded = data.get("content")
-            if encoded:
-                return base64.b64decode(encoded).decode("utf-8", errors="replace"), data.get("sha")
-        else:
-            log_error(f"Could not read {file_name}: HTTP {response.status_code}")
-    except Exception as e:
-        log_error(f"Error reading {file_name}: {e}")
-    return None, None
-
-
-def extract_endpoint_and_token(content):
-    remote_url_match = re.search(r"(?m)^\s*REMOTE_URL\s*=\s*(https://[^\s]+)\s*$", content)
-    api_token_match = re.search(r"(?m)^\s*API_TOKEN\s*=\s*([A-Za-z0-9_-]{20,})\s*$", content)
-    endpoint = None
-    token = None
-    if remote_url_match:
-        remote_url = remote_url_match.group(1).strip()
-        endpoint = remote_url.rstrip("/") + "/command"
-    if api_token_match:
-        token = api_token_match.group(1).strip()
-    return endpoint, token
-
-
-def get_endpoint_configs():
-    all_files = get_all_txt_files()
-    logs_files = [f for f in all_files if f["name"].startswith("logs_")]
-    other_files = [f for f in all_files if not f["name"].startswith("logs_")]
-    configs = []
-    for file_info in logs_files + other_files:
-        file_name = file_info["name"]
-        content, _ = get_file_content(file_name)
-        if content:
-            endpoint, token = extract_endpoint_and_token(content)
-            if endpoint and token:
-                log_info(f"✅ Found config in {LOGS_DIR}/{file_name}")
-                configs.append({
-                    "file_name": file_name,
-                    "endpoint": endpoint,
-                    "token": token,
-                    "sha": file_info.get("sha")
-                })
-    log_info(f"📊 Total endpoint configs found in {LOGS_DIR}: {len(configs)}")
-    return configs
-
-
-# ============================================================
-# OTHER HELPERS
+# DELETE USED ADDRESSES
 # ============================================================
 
 def delete_used_addresses_from_github(addresses_to_remove):
@@ -262,6 +192,10 @@ def delete_used_addresses_from_github(addresses_to_remove):
         return False
 
 
+# ============================================================
+# WORKFLOW HELPERS
+# ============================================================
+
 def cancel_workflow(run_id):
     if not run_id or not GITHUB_TOKEN:
         return False
@@ -313,6 +247,7 @@ def generate_script_for_batch(batch, batch_index):
 
 
 def trigger_workflow_with_inputs(batch_id):
+    """روشن کردن سرور - با GITHUB_TOKEN"""
     dispatch_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     dispatch_payload = {
         "ref": GITHUB_REF,
@@ -326,18 +261,115 @@ def trigger_workflow_with_inputs(batch_id):
         return None
 
 
-def get_latest_run_id():
+def get_run_id_for_batch(batch_id):
+    """گرفتن Run ID بر اساس batch_id از inputs"""
     runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     try:
-        response = requests.get(runs_url, headers=github_headers(), params={"branch": GITHUB_REF, "per_page": 1}, timeout=30)
+        response = requests.get(
+            runs_url,
+            headers=github_headers(),
+            params={"branch": GITHUB_REF, "per_page": 20},
+            timeout=30
+        )
         if response.status_code == 200:
             runs = response.json().get("workflow_runs", [])
+            for run in runs:
+                # چک کنیم که run مربوط به همین batch_id هست
+                run_name = run.get("name", "") or ""
+                display_title = run.get("display_title", "") or ""
+                if str(batch_id) in run_name or str(batch_id) in display_title:
+                    return run.get("id")
+            # اگه پیدا نشد، جدیدترین رو برگردون
             if runs:
                 return runs[0].get("id")
     except Exception as e:
-        log_error(f"Error getting latest run: {e}")
+        log_error(f"Error getting run_id for batch {batch_id}: {e}")
     return None
 
+
+# ============================================================
+# READ ENDPOINT CONFIGS FROM .txt FILES IN logs/ DIRECTORY
+# ============================================================
+
+def get_all_txt_files():
+    """لیست همه فایل‌های .txt در پوشه logs را برمی‌گرداند."""
+    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
+    try:
+        response = requests.get(url, headers=github_headers(), timeout=30)
+        if response.status_code == 200:
+            files = response.json()
+            return [f for f in files if f["name"].endswith(".txt")]
+        elif response.status_code == 404:
+            log_warning(f"⚠️ Pوشه {LOGS_DIR}/ پیدا نشد")
+            return []
+        else:
+            log_error(f"Could not list contents of {LOGS_DIR}: HTTP {response.status_code}")
+            return []
+    except Exception as e:
+        log_error(f"Error listing contents of {LOGS_DIR}: {e}")
+        return []
+
+
+def get_file_content(file_name):
+    """محتوای یک فایل .txt در پوشه logs را می‌خواند."""
+    url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}/{file_name}"
+    try:
+        response = requests.get(url, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            encoded = data.get("content")
+            if encoded:
+                return base64.b64decode(encoded).decode("utf-8", errors="replace"), data.get("sha")
+        else:
+            log_error(f"Could not read {file_name}: HTTP {response.status_code}")
+    except Exception as e:
+        log_error(f"Error reading {file_name}: {e}")
+    return None, None
+
+
+def extract_endpoint_and_token(content):
+    remote_url_match = re.search(r"(?m)^\s*REMOTE_URL\s*=\s*(https://[^\s]+)\s*$", content)
+    api_token_match = re.search(r"(?m)^\s*API_TOKEN\s*=\s*([A-Za-z0-9_-]{20,})\s*$", content)
+    endpoint = None
+    token = None
+    if remote_url_match:
+        remote_url = remote_url_match.group(1).strip()
+        endpoint = remote_url.rstrip("/") + "/command"
+    if api_token_match:
+        token = api_token_match.group(1).strip()
+    return endpoint, token
+
+
+def get_endpoint_configs():
+    """همه فایل‌های .txt در پوشه logs را اسکن می‌کند."""
+    all_files = get_all_txt_files()
+    
+    # مرتب‌سازی: logs_*.txt اول
+    logs_files = sorted([f for f in all_files if f["name"].startswith("logs_")], key=lambda x: x["name"])
+    other_files = sorted([f for f in all_files if not f["name"].startswith("logs_")], key=lambda x: x["name"])
+    
+    configs = []
+    for file_info in logs_files + other_files:
+        file_name = file_info["name"]
+        content, _ = get_file_content(file_name)
+        if content:
+            endpoint, token = extract_endpoint_and_token(content)
+            if endpoint and token:
+                log_info(f"✅ Found config in {LOGS_DIR}/{file_name}")
+                configs.append({
+                    "file_name": file_name,
+                    "endpoint": endpoint,
+                    "token": token,
+                    "sha": file_info.get("sha")
+                })
+    
+    log_info(f"📊 Total endpoint configs found in {LOGS_DIR}: {len(configs)}")
+    return configs
+
+
+# ============================================================
+# DELETE ALL TXT FILES
+# ============================================================
 
 def delete_all_txt_files():
     log_separator()
@@ -346,7 +378,7 @@ def delete_all_txt_files():
     deleted_count = 0
     failed_count = 0
     
-    # ۱. حذف همه .txt از پوشه logs
+    # پوشه logs
     try:
         url_logs = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
         response = requests.get(url_logs, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
@@ -359,32 +391,24 @@ def delete_all_txt_files():
                 file_path = f"{LOGS_DIR}/{file_name}"
                 file_sha = file_info.get("sha")
                 if not file_sha:
-                    log_warning(f"⚠️ No SHA for {file_path}, skipping")
                     failed_count += 1
                     continue
                 delete_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{file_path}"
-                delete_payload = {
-                    "message": f"Delete {file_path}",
-                    "sha": file_sha,
-                    "branch": GITHUB_REF,
-                }
+                delete_payload = {"message": f"Delete {file_path}", "sha": file_sha, "branch": GITHUB_REF}
                 try:
                     del_resp = requests.delete(delete_url, headers=github_headers(), json=delete_payload, timeout=30)
                     if del_resp.status_code == 200:
                         log_info(f"✅ Deleted {file_path}")
                         deleted_count += 1
                     else:
-                        log_warning(f"⚠️ Failed to delete {file_path}: HTTP {del_resp.status_code}")
                         failed_count += 1
                 except Exception as e:
                     log_warning(f"⚠️ Error deleting {file_path}: {e}")
                     failed_count += 1
-        else:
-            log_warning(f"⚠️ Could not list {LOGS_DIR}/: HTTP {response.status_code}")
     except Exception as e:
         log_warning(f"⚠️ Error listing {LOGS_DIR}/: {e}")
     
-    # ۲. حذف همه .txt از ریشه مخزن
+    # ریشه
     try:
         url_root = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/"
         response = requests.get(url_root, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
@@ -396,39 +420,30 @@ def delete_all_txt_files():
                 file_name = file_info["name"]
                 file_sha = file_info.get("sha")
                 if not file_sha:
-                    log_warning(f"⚠️ No SHA for {file_name}, skipping")
                     failed_count += 1
                     continue
                 delete_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{file_name}"
-                delete_payload = {
-                    "message": f"Delete {file_name}",
-                    "sha": file_sha,
-                    "branch": GITHUB_REF,
-                }
+                delete_payload = {"message": f"Delete {file_name}", "sha": file_sha, "branch": GITHUB_REF}
                 try:
                     del_resp = requests.delete(delete_url, headers=github_headers(), json=delete_payload, timeout=30)
                     if del_resp.status_code == 200:
                         log_info(f"✅ Deleted {file_name}")
                         deleted_count += 1
                     else:
-                        log_warning(f"⚠️ Failed to delete {file_name}: HTTP {del_resp.status_code}")
                         failed_count += 1
                 except Exception as e:
                     log_warning(f"⚠️ Error deleting {file_name}: {e}")
                     failed_count += 1
-        else:
-            log_warning(f"⚠️ Could not list root: HTTP {response.status_code}")
     except Exception as e:
         log_warning(f"⚠️ Error listing root: {e}")
     
     log_separator()
     log_info(f"📊 Deletion summary: {deleted_count} deleted, {failed_count} failed")
     log_separator()
-    return deleted_count, failed_count
 
 
 # ============================================================
-# SECTION 1 - ADDRESS BATCHES
+# SECTION 1 - LOAD AND SPLIT ADDRESSES
 # ============================================================
 
 log_separator()
@@ -470,59 +485,142 @@ if address_batches and len(address_batches[-1]) < BATCH_SIZE:
     address_batches = address_batches[:-1]
 
 total_address_batches = len(address_batches)
-log_info(f"Total address batches: {total_address_batches} (each with {BATCH_SIZE} addresses)")
+log_info(f"✅ Total address batches: {total_address_batches} (each with {BATCH_SIZE} addresses)")
 
 
 # ============================================================
-# SECTION 2 - ENDPOINT CONFIGS (از پوشه logs)
+# 🔥 SECTION 2 - FIRST: TURN ON ALL SERVERS (WITH GG_TOKEN)
 # ============================================================
 
 log_separator()
-log_info(f"ENDPOINT CONFIG EXTRACTOR (from {LOGS_DIR}/)")
+log_info(f"🔥 STEP 1: TURNING ON {total_address_batches} SERVERS")
+log_separator()
+
+# ساخت اسکریپت‌ها و روشن کردن همه سرورها با هم
+log_info("📝 Generating scripts for all batches...")
+for idx, batch in enumerate(address_batches, start=1):
+    script_file = generate_script_for_batch(batch, idx)
+    log_info(f"   ✅ Script {idx}: {script_file.name} ({script_file.stat().st_size} bytes)")
+
+log_info(f"🔥 Triggering {total_address_batches} workflows (servers)...")
+
+# روشن کردن همه سرورها با هم
+batch_run_ids = {}
+
+with ThreadPoolExecutor(max_workers=min(total_address_batches, 10)) as executor:
+    futures = {}
+    for idx, batch in enumerate(address_batches, start=1):
+        log_info(f"[BATCH {idx}] 🔥 Triggering workflow...")
+        future = executor.submit(trigger_workflow_with_inputs, idx)
+        futures[future] = idx
+    
+    for future in as_completed(futures):
+        batch_idx = futures[future]
+        try:
+            response = future.result()
+            if response and response.status_code in (200, 204):
+                log_info(f"[BATCH {batch_idx}] ✅ Workflow triggered (HTTP {response.status_code})")
+            else:
+                status_code = response.status_code if response else "None"
+                log_error(f"[BATCH {batch_idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
+        except Exception as e:
+            log_error(f"[BATCH {batch_idx}] ❌ Error triggering workflow: {e}")
+
+# صبر ۳ ثانیه تا GitHub Run IDها ثبت بشن
+log_info("⏳ Waiting 3 seconds for GitHub to register runs...")
+time.sleep(3)
+
+# گرفتن Run ID هر بچ
+log_info("📌 Getting Run IDs for all batches...")
+for idx in range(1, total_address_batches + 1):
+    run_id = get_run_id_for_batch(idx)
+    if run_id:
+        batch_run_ids[idx] = run_id
+        log_info(f"[BATCH {idx}] Run ID: {run_id}")
+    else:
+        log_warning(f"[BATCH {idx}] ⚠️ Could not get Run ID")
+
+log_separator()
+log_info(f"✅ {len(batch_run_ids)}/{total_address_batches} servers triggered successfully")
+log_separator()
+
+
+# ============================================================
+# 🔥 SECTION 3 - WAIT 60 SECONDS FOR SERVERS TO START
+# ============================================================
+
+log_separator()
+log_info(f"⏳ STEP 2: WAITING {INITIAL_WAIT_SECONDS} SECONDS FOR SERVERS TO START")
+log_separator()
+
+remaining = INITIAL_WAIT_SECONDS
+while remaining > 0:
+    log_info(f"  {remaining} seconds remaining...")
+    sleep_for = min(10, remaining)
+    time.sleep(sleep_for)
+    remaining -= sleep_for
+
+log_info("✅ 60 seconds completed. Servers should be ready now.")
+
+
+# ============================================================
+# 🔥 SECTION 4 - NOW READ logs/ DIRECTORY FOR ENDPOINT CONFIGS
+# ============================================================
+
+log_separator()
+log_info(f"📖 STEP 3: READING ENDPOINT CONFIGS FROM {LOGS_DIR}/")
 log_separator()
 
 endpoint_configs = get_endpoint_configs()
 
 if not endpoint_configs:
-    log_warning("⚠️ No endpoint configs found. Send/run will be skipped.")
+    log_warning("⚠️ No endpoint configs found in logs/ directory.")
+else:
+    log_info(f"✅ Found {len(endpoint_configs)} endpoint configs")
 
 
 # ============================================================
-# SECTION 3 - VALIDATE
+# SECTION 5 - MATCH BATCHES WITH CONFIGS & PROCESS
 # ============================================================
 
 log_separator()
-log_info("VALIDATING ENDPOINT CONFIGS")
+log_info("🔗 STEP 4: MATCHING BATCHES WITH ENDPOINT CONFIGS")
 log_separator()
+
 log_info(f"Address batches: {total_address_batches}")
 log_info(f"Endpoint configs: {len(endpoint_configs)}")
 
+# تعیین تعداد قابل پردازش
+processable_count = min(total_address_batches, len(endpoint_configs))
+
+if processable_count == 0:
+    log_error("❌ No processable batches (no configs available)")
+    log_info("🛑 Shutting down all triggered servers...")
+    for idx, run_id in batch_run_ids.items():
+        cancel_workflow(run_id)
+    fail("No endpoint configs available for processing")
+
 if len(endpoint_configs) < total_address_batches:
-    log_error(f"❌ Not enough endpoint configs!")
-    log_error(f"   Need at least {total_address_batches} configs, but found {len(endpoint_configs)}")
-    fail("Insufficient endpoint configs for all batches")
+    log_warning(f"⚠️ Only {len(endpoint_configs)} configs for {total_address_batches} batches.")
+    log_warning(f"⚠️ Processing first {processable_count} batches only.")
 
-if len(endpoint_configs) > total_address_batches:
-    log_warning(f"⚠️ More configs than batches. Using only first {total_address_batches} configs.")
-    endpoint_configs = endpoint_configs[:total_address_batches]
-
-log_info(f"✅ Configs to use: {len(endpoint_configs)} (exactly matching batches)")
+log_info(f"✅ Will process {processable_count} batches")
 
 
 # ============================================================
-# SECTION 4 - PROCESS BATCHES
+# SECTION 6 - PROCESS BATCHES WITH THEIR CONFIGS
 # ============================================================
 
 log_separator()
-log_info(f"🚀 PROCESSING {total_address_batches} BATCHES")
+log_info(f"🚀 STEP 5: PROCESSING {processable_count} BATCHES")
 log_separator()
 log_info(f"Send & Run Enabled: {ENABLE_SEND_AND_RUN}")
 
 
-def process_single_batch(batch_index, batch, config, config_index):
+def process_single_batch(batch_index, batch, config, config_index, run_id):
     batch_result = {
         "batch": batch_index,
-        "run_id": None,
+        "run_id": run_id,
         "endpoint": None,
         "token": None,
         "successful": False,
@@ -532,7 +630,7 @@ def process_single_batch(batch_index, batch, config, config_index):
     }
     
     try:
-        log_info(f"[BATCH {batch_index}] 🚀 Starting... (using config #{config_index + 1} from {config['file_name']})")
+        log_info(f"[BATCH {batch_index}] 🚀 Starting... (config #{config_index + 1} from {config['file_name']})")
         
         for pos, item in enumerate(batch, start=1):
             log_info(f"[BATCH {batch_index}]   TARGET{pos}: index={item['index']}, address={item['address'][:30]}...")
@@ -542,41 +640,15 @@ def process_single_batch(batch_index, batch, config, config_index):
         log_info(f"[BATCH {batch_index}] 🌐 Endpoint {config_index + 1}: {config['endpoint']}")
         log_info(f"[BATCH {batch_index}] 📁 Config file: {LOGS_DIR}/{config['file_name']}")
         
-        # ۱ - ساخت اسکریپت
-        script_file = generate_script_for_batch(batch, batch_index)
-        log_info(f"[BATCH {batch_index}] 📝 Script: {script_file.name} ({script_file.stat().st_size} bytes)")
+        script_file = BASE_DIR / f"script_{batch_index}.sh"
+        if not script_file.exists():
+            script_file = generate_script_for_batch(batch, batch_index)
         
-        # ۲ - روشن کردن سرور
-        log_info(f"[BATCH {batch_index}] 🔥 Triggering workflow...")
-        dispatch_response = trigger_workflow_with_inputs(batch_index)
-        
-        if not dispatch_response or dispatch_response.status_code not in (200, 204):
-            log_error(f"[BATCH {batch_index}] ❌ Failed to trigger workflow")
-            batch_result["error"] = "Workflow trigger failed"
-            save_to_blacklist(batch_result["addresses"])
-            return batch_result
-        
-        log_info(f"[BATCH {batch_index}] ✅ Workflow triggered")
-        
-        time.sleep(3)
-        run_id = get_latest_run_id()
-        if run_id:
-            batch_result["run_id"] = run_id
-            log_info(f"[BATCH {batch_index}] Run ID: {run_id}")
-        else:
-            log_warning(f"[BATCH {batch_index}] ⚠️ Could not get run_id")
-        
-        # ۳ - صبر ۶۰ ثانیه
-        log_info(f"[BATCH {batch_index}] ⏳ Waiting {INITIAL_WAIT_SECONDS} seconds...")
-        time.sleep(INITIAL_WAIT_SECONDS)
-        
-        # ۴ - استفاده از endpoint/token از config
         endpoint = config["endpoint"]
         token = config["token"]
         batch_result["endpoint"] = endpoint
         batch_result["token"] = token
         
-        # ۵ - ارسال و اجرا
         script_successful = False
         script_status = "unknown"
         
@@ -637,39 +709,28 @@ def process_single_batch(batch_index, batch, config, config_index):
                 log_error(f"[BATCH {batch_index}] STEP 2 failed: {e}")
                 script_status = "request_failed"
         else:
-            # 🔥 حالت غیرفعال: فقط گزارش، بدون تغییر در آدرس‌ها
             log_info(f"[BATCH {batch_index}] 📝 SEND/RUN DISABLED (REPORT ONLY)")
             log_info(f"[BATCH {batch_index}]    Would have sent: {script_file.name}")
             log_info(f"[BATCH {batch_index}]    Would have used endpoint: {endpoint}")
-            log_info(f"[BATCH {batch_index}]    Would have used token: {token_masked}")
-            
-            # 🔥 script_successful = False تا آدرس‌ها پاک نشن
             script_successful = False
             script_status = "skipped"
         
         batch_result["successful"] = script_successful
         batch_result["status"] = script_status
         
-        # ۷ - پاک کردن آدرس‌ها
+        # پاک کردن آدرس‌ها
         if script_successful:
             log_info(f"[BATCH {batch_index}] ✅ Deleting addresses from GitHub...")
             used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
             delete_used_addresses_from_github(used_addresses)
         else:
             if script_status == "skipped":
-                log_info(f"[BATCH {batch_index}] ℹ️ Send/Run was disabled. Addresses NOT deleted, NOT blacklisted.")
+                log_info(f"[BATCH {batch_index}] ℹ️ Send/Run disabled. Addresses untouched.")
             else:
-                log_warning(f"[BATCH {batch_index}] ⚠️ Script NOT successful! Adding addresses to blacklist...")
+                log_warning(f"[BATCH {batch_index}] ⚠️ Script NOT successful! Adding to blacklist...")
                 save_to_blacklist(batch_result["addresses"])
         
-        # ۸ - خاموش کردن سرور
-        if run_id:
-            log_info(f"[BATCH {batch_index}] 🛑 Shutting down server...")
-            cancel_workflow(run_id)
-        else:
-            log_warning(f"[BATCH {batch_index}] ⚠️ No run_id, cannot cancel")
-        
-        log_info(f"[BATCH {batch_index}] ✅ COMPLETED!")
+        log_info(f"[BATCH {batch_index}] ✅ PROCESSING COMPLETED!")
         
     except Exception as e:
         log_error(f"[BATCH {batch_index}] ❌ CRITICAL ERROR: {e}")
@@ -679,22 +740,16 @@ def process_single_batch(batch_index, batch, config, config_index):
     return batch_result
 
 
-# ============================================================
-# اجرا - هر batch با config مخصوص خودش
-# ============================================================
-
-if not address_batches:
-    fail("No address batches to process")
-
-log_info(f"🚀 Launching {len(address_batches)} batches with unique configs...")
-
+# اجرا
 batch_results = []
 
-with ThreadPoolExecutor(max_workers=min(len(address_batches), 10)) as executor:
+with ThreadPoolExecutor(max_workers=min(processable_count, 10)) as executor:
     futures = []
-    for idx, batch in enumerate(address_batches, start=1):
+    for idx in range(1, processable_count + 1):
+        batch = address_batches[idx - 1]
         config = endpoint_configs[idx - 1]
-        futures.append(executor.submit(process_single_batch, idx, batch, config, idx - 1))
+        run_id = batch_run_ids.get(idx)
+        futures.append(executor.submit(process_single_batch, idx, batch, config, idx - 1, run_id))
     
     for future in as_completed(futures):
         try:
@@ -705,11 +760,28 @@ with ThreadPoolExecutor(max_workers=min(len(address_batches), 10)) as executor:
 
 
 # ============================================================
-# DELETE ALL .txt FILES (در انتهای کار)
+# SECTION 7 - SHUT DOWN ALL SERVERS (INCLUDING UNPROCESSED)
 # ============================================================
 
 log_separator()
-log_info("🗑️ CLEANING UP ALL .txt FILES")
+log_info("🛑 STEP 6: SHUTTING DOWN ALL SERVERS")
+log_separator()
+
+for idx in range(1, total_address_batches + 1):
+    run_id = batch_run_ids.get(idx)
+    if run_id:
+        log_info(f"[BATCH {idx}] 🛑 Shutting down server (Run ID: {run_id})...")
+        cancel_workflow(run_id)
+    else:
+        log_warning(f"[BATCH {idx}] ⚠️ No Run ID, cannot shut down")
+
+
+# ============================================================
+# DELETE ALL .txt FILES
+# ============================================================
+
+log_separator()
+log_info("🗑️ STEP 7: CLEANING UP .txt FILES")
 log_separator()
 
 delete_all_txt_files()
@@ -720,11 +792,13 @@ delete_all_txt_files()
 # ============================================================
 
 log_separator()
-log_info("🎉 ALL BATCHES COMPLETED!")
+log_info("🎉 ALL DONE!")
 log_separator()
 log_info("📊 SUMMARY:")
-log_info(f"   Total address batches: {len(batch_results)}")
-log_info(f"   Endpoint configs used: {len(endpoint_configs)}")
+log_info(f"   Total address batches: {total_address_batches}")
+log_info(f"   Servers triggered: {len(batch_run_ids)}")
+log_info(f"   Endpoint configs found: {len(endpoint_configs)}")
+log_info(f"   Batches processed: {len(batch_results)}")
 log_info(f"   Send & Run Enabled: {ENABLE_SEND_AND_RUN}")
 
 final_blacklist = load_blacklist()
@@ -733,9 +807,11 @@ log_info(f"📋 Final blacklist: {len(final_blacklist)} addresses")
 success_count = 0
 failed_count = 0
 skipped_count = 0
+
 log_separator()
 log_info("📊 BATCH RESULTS:")
 log_separator()
+
 for result in batch_results:
     status_icon = "✅" if result["successful"] else "❌"
     log_info(f"   Batch {result['batch']}: {status_icon} Run ID={result['run_id']}, Status={result['status']}")
