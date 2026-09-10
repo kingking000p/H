@@ -94,7 +94,6 @@ RESULT_CHECK_DELAY = 10
 QUICK_CMD_TIMEOUT = 15
 START_SCRIPT_TIMEOUT = 20
 
-# 🔥 اندازه chunk برای آپلود base64
 CHUNK_SIZE = 1000
 
 
@@ -149,9 +148,7 @@ def save_to_blacklist(addresses):
 
 
 def parse_response_stdout(response_text):
-    """
-    🔥 استخراج stdout از پاسخ JSON
-    """
+    """استخراج stdout از پاسخ JSON"""
     try:
         resp_json = json.loads(response_text)
         stdout = resp_json.get("stdout", "")
@@ -161,7 +158,6 @@ def parse_response_stdout(response_text):
             line = line.strip()
             if not line:
                 continue
-            # رد کردن خطوطی که خود دستور هستن
             if line.startswith("if [") or line.startswith("echo ") or line.startswith("cat "):
                 continue
             if line.startswith("ls ") or line.startswith("wc ") or line.startswith("test "):
@@ -210,7 +206,6 @@ def wait_for_endpoint_alive(endpoint, token, max_retries=None, delay=None):
 
 
 def send_command_to_server(endpoint, token, command, timeout=30):
-    """🔥 ارسال دستور به سرور"""
     try:
         response = requests.post(
             endpoint,
@@ -225,23 +220,18 @@ def send_command_to_server(endpoint, token, command, timeout=30):
 
 
 def upload_script_to_server(endpoint, token, batch_index, b64_data):
-    """
-    🔥 آپلود اسکریپت در چند chunk برای جلوگیری از محدودیت PTY
-    """
+    """آپلود اسکریپت در چند chunk"""
     script_path = f"/tmp/script_{batch_index}.b64"
     
-    # پاک کردن فایل قبلی
     resp = send_command_to_server(endpoint, token, f"rm -f {script_path}", timeout=QUICK_CMD_TIMEOUT)
     if not resp or resp.status_code != 200:
         log_error(f"Could not clear {script_path}")
         return False
     
-    # تقسیم به chunks
     chunks = [b64_data[i:i+CHUNK_SIZE] for i in range(0, len(b64_data), CHUNK_SIZE)]
     log_info(f"[BATCH {batch_index}] 📤 Uploading {len(b64_data)} chars in {len(chunks)} chunks...")
     
     for i, chunk in enumerate(chunks, start=1):
-        # هر chunk رو با printf بنویس (بدون newline)
         cmd = f"printf '%s' '{chunk}' >> {script_path}"
         resp = send_command_to_server(endpoint, token, cmd, timeout=QUICK_CMD_TIMEOUT)
         
@@ -252,7 +242,6 @@ def upload_script_to_server(endpoint, token, batch_index, b64_data):
         if i % 5 == 0 or i == len(chunks):
             log_info(f"[BATCH {batch_index}] 📤 Chunk {i}/{len(chunks)} uploaded")
     
-    # تأیید اندازه فایل
     check_cmd = f"wc -c < {script_path}"
     check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=QUICK_CMD_TIMEOUT)
     
@@ -268,6 +257,72 @@ def upload_script_to_server(endpoint, token, batch_index, b64_data):
                 return False
     
     return True
+
+
+# ============================================================
+# 🔥 NEW: تشخیص دقیق وضعیت اسکریپت
+# ============================================================
+
+def check_if_script_successful(response_text):
+    """
+    🔥 تشخیص دقیق وضعیت اسکریپت با تفکیک حالت‌ها
+    
+    خروجی‌ها:
+    - ("success", "success"): موفق واقعی (claim + receive)
+    - ("already_claimed", "already_claimed"): قبلاً claim شده (XNO منتظر receive)
+    - (False, "faucet_budget"): بودجه فاست تموم شده (موقت)
+    - (False, "ip_limit"): محدودیت IP
+    - (False, "partial"): بعضی موفق، بعضی ناموفق
+    - (False, "unknown"): نامشخص
+    """
+    if not response_text:
+        return False, "empty_response"
+    
+    response_lower = response_text.lower()
+    
+    # ۱. بررسی بودجه فاست (مشکل موقت)
+    if "faucet hourly budget used up" in response_lower:
+        return False, "faucet_budget"
+    
+    if "try again shortly" in response_lower:
+        return False, "faucet_budget"
+    
+    # ۲. بررسی محدودیت IP
+    if "claims per ip" in response_lower or "ip limit" in response_lower:
+        return False, "ip_limit"
+    
+    # ۳. بررسی "قبلاً claim شده" (آدرس معتبره ولی دیگه نمیشه claim کرد)
+    already_claimed_indicators = [
+        "already claimed",
+        "one claim per address",
+        "address already claimed",
+    ]
+    for indicator in already_claimed_indicators:
+        if indicator in response_lower:
+            # اگه حداقل یه "already claimed" هست، آدرس‌ها معتبر هستن
+            return True, "already_claimed"
+    
+    # ۴. بررسی موفقیت واقعی
+    success_indicators = [
+        "claim successful",
+        "receive successful",
+        "block hash",
+        "balance:",
+    ]
+    for indicator in success_indicators:
+        if indicator in response_lower:
+            return True, "success"
+    
+    # ۵. بررسی "done" در آخر اسکریپت
+    if "done" in response_lower and "no successful claims" not in response_lower:
+        return True, "success"
+    
+    # ۶. اگه فقط "no successful claims" بود، یعنی همه ناموفق
+    if "no successful claims" in response_lower:
+        # ولی اگه "already claimed" هم داشته، یعنی آدرس‌ها قبلاً استفاده شدن
+        return False, "unknown"
+    
+    return False, "unknown"
 
 
 # ============================================================
@@ -356,21 +411,6 @@ def cancel_workflow(run_id):
     except Exception as e:
         log_error(f"Cancel request failed: {e}")
         return False
-
-
-def check_if_script_successful(response_text):
-    if not response_text:
-        return False, "empty_response"
-    response_lower = response_text.lower()
-    if "faucet hourly budget used up" in response_lower:
-        return False, "faucet_budget"
-    if "try again shortly" in response_lower:
-        return False, "faucet_budget"
-    success_indicators = ["claim successful", "receive successful", "block hash", "balance:", "total:", "done"]
-    for indicator in success_indicators:
-        if indicator in response_lower:
-            return True, "success"
-    return False, "unknown"
 
 
 def generate_script_for_batch(batch, batch_index):
@@ -930,7 +970,6 @@ def process_single_batch(batch_index, batch, config, run_id):
             log_info(f"[BATCH {batch_index}] 🚀 Sending and running script...")
             log_separator()
             
-            # خواندن اسکریپت
             try:
                 with open(script_file, "rb") as f:
                     script_bytes = f.read()
@@ -941,7 +980,7 @@ def process_single_batch(batch_index, batch, config, run_id):
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            # === STEP A: آپلود اسکریپت در chunks ===
+            # === STEP A: آپلود اسکریپت ===
             log_info(f"[BATCH {batch_index}] 📤 STEP A: Uploading script in chunks...")
             
             upload_ok = upload_script_to_server(endpoint, token, batch_index, b64_data)
@@ -954,14 +993,12 @@ def process_single_batch(batch_index, batch, config, run_id):
             
             log_info(f"[BATCH {batch_index}] ✅ STEP A: Upload OK")
             
-            # === STEP B: دیکد و شروع اسکریپت با setsid ===
+            # === STEP B: اجرای اسکریپت با setsid ===
             log_info(f"[BATCH {batch_index}] 🚀 STEP B: Starting script with setsid...")
             
-            # پاک کردن فایل‌های قبلی
             cleanup_cmd = f"rm -f /tmp/result_{batch_index}.txt /tmp/done_{batch_index}.flag /tmp/exit_code_{batch_index}.txt /tmp/b64error_{batch_index}.txt"
             send_command_to_server(endpoint, token, cleanup_cmd, timeout=QUICK_CMD_TIMEOUT)
             
-            # دستور setsid
             bg_command = (
                 f"base64 -d /tmp/script_{batch_index}.b64 > /tmp/script_{batch_index}.sh 2>/tmp/b64error_{batch_index}.txt && "
                 f"chmod +x /tmp/script_{batch_index}.sh && "
@@ -983,7 +1020,7 @@ def process_single_batch(batch_index, batch, config, run_id):
             
             log_info(f"[BATCH {batch_index}] ✅ STEP B: HTTP {response2.status_code}")
             
-            # === STEP C: صبر و بررسی وضعیت ===
+            # === STEP C: صبر و بررسی ===
             log_info(f"[BATCH {batch_index}] ⏳ STEP C: Waiting for script to complete (max {SCRIPT_EXECUTION_WAIT}s)...")
             
             start_wait = time.time()
@@ -998,7 +1035,6 @@ def process_single_batch(batch_index, batch, config, run_id):
                 check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=QUICK_CMD_TIMEOUT)
                 
                 if check_resp and check_resp.status_code == 200:
-                    # 🔥 فقط stdout رو بررسی کن
                     stdout = parse_response_stdout(check_resp.text)
                     
                     if stdout and "NOT_YET" not in stdout:
@@ -1054,7 +1090,7 @@ def process_single_batch(batch_index, batch, config, run_id):
             
             log_separator()
             
-            # === STEP F: بررسی موفقیت ===
+            # === STEP F: 🔥 بررسی دقیق وضعیت ===
             if result_text and "NO_RESULT" not in result_text and len(result_text.strip()) > 10:
                 is_success, status = check_if_script_successful(result_text)
                 script_successful = is_success
@@ -1071,20 +1107,44 @@ def process_single_batch(batch_index, batch, config, run_id):
         batch_result["successful"] = script_successful
         batch_result["status"] = script_status
         
-        # === STEP G: حذف آدرس‌ها ===
+        # === STEP G: 🔥 مدیریت آدرس‌ها بر اساس وضعیت ===
+        
         if script_successful:
+            # حالت‌های موفق (success یا already_claimed) → آدرس‌ها رو حذف کن
             log_separator()
-            log_info(f"[BATCH {batch_index}] ✅ Script succeeded! Deleting addresses...")
+            log_info(f"[BATCH {batch_index}] ✅ Script succeeded (status: {script_status})! Deleting addresses from GitHub...")
             log_separator()
             used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
             delete_used_addresses_from_github(used_addresses)
+        
+        elif script_status == "faucet_budget":
+            # 🔥 بودجه فاست تموم شده - آدرس‌ها معتبرن، فقط صبر کن
+            log_separator()
+            log_warning(f"[BATCH {batch_index}] ⏳ FAUCET BUDGET EXHAUSTED (temporary)")
+            log_warning(f"[BATCH {batch_index}] ⏳ Addresses are STILL VALID - NOT blacklisted")
+            log_warning(f"[BATCH {batch_index}] ⏳ They will be retried in the next run")
+            log_warning(f"[BATCH {batch_index}] ⏳ Addresses NOT deleted from GitHub")
+            log_separator()
+            # آدرس‌ها نه blacklist میشن، نه از GitHub حذف میشن
+        
+        elif script_status == "ip_limit":
+            # 🔥 محدودیت IP - آدرس‌ها معتبرن
+            log_separator()
+            log_warning(f"[BATCH {batch_index}] 🌐 IP LIMIT REACHED (temporary)")
+            log_warning(f"[BATCH {batch_index}] 🌐 Addresses are STILL VALID - NOT blacklisted")
+            log_separator()
+            # آدرس‌ها نه blacklist میشن، نه از GitHub حذف میشن
+        
+        elif script_status == "skipped":
+            log_info(f"[BATCH {batch_index}] ℹ️ Send/Run disabled. Addresses untouched.")
+        
         else:
-            if script_status == "skipped":
-                log_info(f"[BATCH {batch_index}] ℹ️ Send/Run disabled. Addresses untouched.")
-            else:
-                log_warning(f"[BATCH {batch_index}] ⚠️ Script NOT successful (status: {script_status})!")
-                log_warning(f"[BATCH {batch_index}] ⚠️ Adding addresses to blacklist...")
-                save_to_blacklist(batch_result["addresses"])
+            # 🔥 خطاهای واقعی → آدرس‌ها به blacklist
+            log_separator()
+            log_warning(f"[BATCH {batch_index}] ⚠️ REAL ERROR (status: {script_status})!")
+            log_warning(f"[BATCH {batch_index}] ⚠️ Adding addresses to blacklist...")
+            log_separator()
+            save_to_blacklist(batch_result["addresses"])
         
         log_info(f"[BATCH {batch_index}] ✅ PROCESSING COMPLETED!")
         
@@ -1165,22 +1225,31 @@ log_info(f"📋 Final blacklist: {len(final_blacklist)} addresses")
 success_count = 0
 failed_count = 0
 skipped_count = 0
+retry_count = 0
 
 log_separator()
 log_info("📊 BATCH RESULTS:")
 log_separator()
 
 for result in batch_results:
-    status_icon = "✅" if result["successful"] else "❌"
-    log_info(f"   Batch {result['batch']}: {status_icon} Run ID={result['run_id']}, Status={result['status']}")
+    status = result["status"]
     if result["successful"]:
+        status_icon = "✅"
         success_count += 1
-    elif result["status"] == "skipped":
+    elif status in ("faucet_budget", "ip_limit"):
+        status_icon = "⏳"
+        retry_count += 1
+    elif status == "skipped":
+        status_icon = "⏭️"
         skipped_count += 1
     else:
+        status_icon = "❌"
         failed_count += 1
+    
+    log_info(f"   Batch {result['batch']}: {status_icon} Run ID={result['run_id']}, Status={status}")
 
 log_info(f"   ✅ Successful: {success_count}/{len(batch_results)}")
+log_info(f"   ⏳ Retry later (temporary): {retry_count}/{len(batch_results)}")
 log_info(f"   ⏭️ Skipped: {skipped_count}/{len(batch_results)}")
 log_info(f"   ❌ Failed: {failed_count}/{len(batch_results)}")
 
