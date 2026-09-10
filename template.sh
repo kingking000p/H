@@ -64,13 +64,12 @@ session = requests.Session()
 
 
 # ============================================================
-# 🔥 HASH CLEANER (کلید حل مشکل)
+# 🔥 HASH CLEANER
 # ============================================================
 
 def clean_hash(h):
     """
     🔥 پاک‌سازی کامل hash از هر کاراکتر غیر-hex
-    این تابع مشکل 'non-hexadecimal number found in fromhex()' رو حل می‌کنه
     """
     if h is None:
         return None
@@ -84,7 +83,7 @@ def clean_hash(h):
     else:
         h = str(h)
     
-    # فقط کاراکترهای hex رو نگه دار (0-9, a-f, A-F)
+    # فقط کاراکترهای hex رو نگه دار
     h = "".join(c for c in h if c in "0123456789abcdefABCDEF")
     
     return h
@@ -410,16 +409,24 @@ for target in TARGETS:
 
         status = claim(addr)
 
-        if status == "success":
+        # ============================================================
+        # 🔥 FIX: حالا "claimed" هم receive می‌شه!
+        # ============================================================
+        if status in ("success", "claimed"):
             item = {"index": idx, "address": addr}
             successful.append(item)
-            print(f">>> SUCCESSFUL CLAIM for {addr}")
-
+            
+            if status == "success":
+                print(f">>> SUCCESSFUL CLAIM for {addr}")
+            else:
+                print(f">>> ALREADY CLAIMED - but XNO may be pending. Trying receive...")
+            
+            # Wait for the transaction to arrive, then receive it
             pending = wait_for_pending(idx, addr)
             if pending:
                 receive(idx, addr, pending)
             else:
-                print(f"⚠️ payment not received for {addr} (index {idx}) - skipping receive")
+                print(f"⚠️ no pending found for {addr} (index {idx}) - nothing to receive")
 
         elif status == "ip_limit":
             print("Faucet IP limit reached. Stopping further attempts.")
