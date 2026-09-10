@@ -79,11 +79,14 @@ LOGS_DIR = "logs"
 # TIMING
 # ============================================================
 
-INITIAL_WAIT_SECONDS = 90
-LOG_RETRY_COUNT = 15
+INITIAL_WAIT_SECONDS = 180          # 🔥 افزایش از ۹۰ به ۱۸۰ (۳ دقیقه)
+LOG_RETRY_COUNT = 20
 LOG_RETRY_DELAY = 5
 RUN_ID_WAIT_SECONDS = 5
 RUN_ID_MAX_RETRIES = 5
+TRIGGER_DELAY_SECONDS = 15          # 🔥 فاصله بین triggerها
+ENDPOINT_CHECK_RETRIES = 5          # 🔥 تعداد تلاش برای چک endpoint
+ENDPOINT_CHECK_DELAY = 20           # 🔥 فاصله بین چک‌ها
 
 
 # ============================================================
@@ -134,6 +137,48 @@ def save_to_blacklist(addresses):
         for addr in new_addresses:
             f.write(addr + "\n")
     log_warning(f"⚠️ Added {len(new_addresses)} addresses to blacklist")
+
+
+def check_endpoint_alive(endpoint, token):
+    """
+    🔥 بررسی می‌کنه که endpoint واقعاً زنده هست یا نه
+    """
+    base_url = endpoint.replace("/command", "")
+    try:
+        response = requests.get(
+            base_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15
+        )
+        if response.status_code == 200:
+            return True, response.text[:100]
+        else:
+            return False, f"HTTP {response.status_code}"
+    except requests.RequestException as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def wait_for_endpoint_alive(endpoint, token, max_retries=None, delay=None):
+    """
+    🔥 صبر می‌کنه تا endpoint زنده بشه
+    """
+    if max_retries is None:
+        max_retries = ENDPOINT_CHECK_RETRIES
+    if delay is None:
+        delay = ENDPOINT_CHECK_DELAY
+    
+    for attempt in range(1, max_retries + 1):
+        is_alive, info = check_endpoint_alive(endpoint, token)
+        if is_alive:
+            log_info(f"✅ Endpoint is alive! (attempt {attempt})")
+            return True
+        log_warning(f"⚠️ Endpoint not alive (attempt {attempt}/{max_retries}): {info}")
+        if attempt < max_retries:
+            time.sleep(delay)
+    
+    return False
 
 
 # ============================================================
@@ -376,11 +421,9 @@ def extract_endpoint_and_token(content):
 def get_endpoint_configs(valid_run_ids=None):
     """
     🔥 اسکن فایل‌های .txt در logs/ با فیلتر Run ID
-    فقط فایل‌هایی که Run IDشون توی valid_run_ids هست رو برمی‌گردونه
     """
     all_files = get_all_txt_files()
     
-    # 🔥 فیلتر بر اساس Run IDهای معتبر (فقط فایل‌های همین اجرا)
     if valid_run_ids:
         valid_run_ids_str = [str(rid) for rid in valid_run_ids]
         filtered_files = []
@@ -391,14 +434,12 @@ def get_endpoint_configs(valid_run_ids=None):
                     break
         
         if filtered_files:
-            log_info(f"📊 Filtered: {len(filtered_files)} files match current Run IDs ({valid_run_ids_str})")
+            log_info(f"📊 Filtered: {len(filtered_files)} files match current Run IDs")
             all_files = filtered_files
         else:
-            log_warning(f"⚠️ No files match current Run IDs {valid_run_ids_str}")
-            log_warning(f"⚠️ Skipping files from old runs")
+            log_warning(f"⚠️ No files match current Run IDs")
             all_files = []
     
-    # مرتب‌سازی بر اساس batch_id
     def sort_key(f):
         name = f["name"]
         match = re.search(r"batch-(\d+)", name)
@@ -415,7 +456,6 @@ def get_endpoint_configs(valid_run_ids=None):
         if content:
             endpoint, token = extract_endpoint_and_token(content)
             if endpoint and token:
-                # استخراج batch_id و run_id از اسم فایل
                 batch_match = re.search(r"batch-(\d+)", file_name)
                 batch_id_in_file = int(batch_match.group(1)) if batch_match else None
                 
@@ -621,8 +661,8 @@ for idx in range(1, total_address_batches + 1):
         log_error(f"[BATCH {idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
     
     if idx < total_address_batches:
-        log_info(f"[BATCH {idx}] ⏳ Waiting 3s before next batch...")
-        time.sleep(3)
+        log_info(f"[BATCH {idx}] ⏳ Waiting {TRIGGER_DELAY_SECONDS}s before next batch...")
+        time.sleep(TRIGGER_DELAY_SECONDS)
 
 # نمایش خلاصه run_idها
 log_separator()
@@ -647,11 +687,12 @@ log_separator()
 
 
 # ============================================================
-# STEP 2: WAIT FOR SERVERS TO START
+# STEP 2: WAIT FOR SERVERS TO START (INCREASED TO 180 SECONDS)
 # ============================================================
 
 log_separator()
 log_info(f"⏳ STEP 2: WAITING {INITIAL_WAIT_SECONDS} SECONDS FOR SERVERS TO START")
+log_info(f"   (This gives time for Cloudflare Tunnel DNS to propagate)")
 log_separator()
 
 remaining = INITIAL_WAIT_SECONDS
@@ -665,7 +706,7 @@ log_info("✅ Wait completed. Servers should be ready now.")
 
 
 # ============================================================
-# STEP 3: READ logs/ DIRECTORY FOR ENDPOINT CONFIGS (FILTERED BY RUN ID)
+# STEP 3: READ logs/ DIRECTORY FOR ENDPOINT CONFIGS
 # ============================================================
 
 log_separator()
@@ -676,10 +717,10 @@ log_separator()
 current_run_ids = list(batch_run_ids.values())
 log_info(f"📌 Valid Run IDs for this execution: {current_run_ids}")
 
-# 🔥 تلاش چند باره برای پیدا کردن همه configها (با فیلتر Run ID)
+# 🔥 تلاش چند باره برای پیدا کردن همه configها
 endpoint_configs = []
 for attempt in range(1, LOG_RETRY_COUNT + 1):
-    log_info(f"📖 Attempt {attempt}/{LOG_RETRY_COUNT}: Reading configs (filtered by Run IDs)...")
+    log_info(f"📖 Attempt {attempt}/{LOG_RETRY_COUNT}: Reading configs...")
     endpoint_configs = get_endpoint_configs(valid_run_ids=current_run_ids)
     
     if len(endpoint_configs) >= total_address_batches:
@@ -697,6 +738,40 @@ else:
 
 
 # ============================================================
+# 🔥 STEP 3.5: CHECK IF ENDPOINTS ARE ALIVE
+# ============================================================
+
+log_separator()
+log_info("🔍 STEP 3.5: CHECKING IF ENDPOINTS ARE ALIVE")
+log_separator()
+
+alive_configs = []
+for config in endpoint_configs:
+    log_info(f"🔍 Checking endpoint for {config['file_name']}...")
+    log_info(f"   Endpoint: {config['endpoint']}")
+    
+    is_alive = wait_for_endpoint_alive(
+        config['endpoint'],
+        config['token'],
+        max_retries=ENDPOINT_CHECK_RETRIES,
+        delay=ENDPOINT_CHECK_DELAY
+    )
+    
+    if is_alive:
+        log_info(f"   ✅ Endpoint is ALIVE")
+        alive_configs.append(config)
+    else:
+        log_error(f"   ❌ Endpoint is NOT reachable after {ENDPOINT_CHECK_RETRIES} attempts")
+
+endpoint_configs = alive_configs
+
+if not endpoint_configs:
+    log_error("❌ No alive endpoints found! All servers may have shut down already.")
+else:
+    log_info(f"✅ {len(endpoint_configs)} alive endpoints ready")
+
+
+# ============================================================
 # STEP 4: MATCH BATCHES WITH CONFIGS
 # ============================================================
 
@@ -710,11 +785,11 @@ log_info(f"Endpoint configs: {len(endpoint_configs)}")
 processable_count = min(total_address_batches, len(endpoint_configs))
 
 if processable_count == 0:
-    log_error("❌ No processable batches (no configs available)")
+    log_error("❌ No processable batches (no alive configs available)")
     log_info("🛑 Shutting down all triggered servers...")
     for idx, run_id in batch_run_ids.items():
         cancel_workflow(run_id)
-    fail("No endpoint configs available for processing")
+    fail("No alive endpoint configs available for processing")
 
 if len(endpoint_configs) < total_address_batches:
     log_warning(f"⚠️ Only {len(endpoint_configs)} configs for {total_address_batches} batches.")
