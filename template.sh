@@ -1,3 +1,8 @@
+#!/bin/bash
+# ============================================================
+# FEELLESS402 CLAIM + RECEIVE
+# ============================================================
+
 python3 -m pip install -U nanopy feeless402 requests && \
 python3 - <<'PY'
 import os
@@ -6,11 +11,12 @@ import secrets
 import requests
 import nanopy
 
+
 # ============================================================
-# 👇👇👇 Enter only these seven variables 👇👇👇
+# 🔥 CONFIG - فقط این ۷ متغیر رو پر کن
 # ============================================================
 
-SEED = '6'
+SEED = '673754a71ff81f5d7dc9c4d1f2e3acd996df945794e4de4c34e0ea4cc2861234'
 ADDRESS1 = '__ADDRESS1__'
 INDEX1  = __INDEX1__
 
@@ -20,10 +26,12 @@ INDEX2  = __INDEX2__
 ADDRESS3 = '__ADDRESS3__'
 INDEX3  = __INDEX3__
 
+
+# ============================================================
+# VALIDATION
 # ============================================================
 
-# ---- Initial validation (all must be filled) ----
-if not SEED or SEED == 'SEED-خودت-اینجا':
+if not SEED or SEED == 'SEEDخودت-این-ج':
     raise SystemExit("❌ ERROR: Enter the SEED correctly!")
 
 if not ADDRESS1 or ADDRESS1 == 'nano_1abc...' or not ADDRESS2 or ADDRESS2 == 'nano_2def...' or not ADDRESS3 or ADDRESS3 == 'nano_3ghi...':
@@ -34,13 +42,15 @@ try:
 except Exception:
     raise SystemExit("❌ ERROR: Indexes must be integers!")
 
-# Final list for processing
 TARGETS = [
     {'address': ADDRESS1, 'index': INDEX1},
     {'address': ADDRESS2, 'index': INDEX2},
     {'address': ADDRESS3, 'index': INDEX3},
 ]
 
+
+# ============================================================
+# CONFIG
 # ============================================================
 
 FAUCET = "https://feeless402.com"
@@ -51,6 +61,33 @@ PENDING_TIMEOUT = 180
 PENDING_INTERVAL = 5
 
 session = requests.Session()
+
+
+# ============================================================
+# 🔥 HASH CLEANER (کلید حل مشکل)
+# ============================================================
+
+def clean_hash(h):
+    """
+    🔥 پاک‌سازی کامل hash از هر کاراکتر غیر-hex
+    این تابع مشکل 'non-hexadecimal number found in fromhex()' رو حل می‌کنه
+    """
+    if h is None:
+        return None
+    
+    # تبدیل bytes به string
+    if isinstance(h, bytes):
+        try:
+            h = h.decode("utf-8", errors="ignore")
+        except Exception:
+            h = str(h)
+    else:
+        h = str(h)
+    
+    # فقط کاراکترهای hex رو نگه دار (0-9, a-f, A-F)
+    h = "".join(c for c in h if c in "0123456789abcdefABCDEF")
+    
+    return h
 
 
 # ============================================================
@@ -76,12 +113,15 @@ def rpc(payload):
 def raw_to_xno(raw):
     return int(raw) / 10**30
 
+
 def derive_account(index):
     return nanopy.Account(sk=nanopy.deterministic_key(SEED, index))
+
 
 def is_already_claimed(result):
     text = str(result).lower()
     return ("already claimed" in text or "one claim per address" in text or "starter xno" in text)
+
 
 def is_ip_limit(result):
     text = str(result).lower()
@@ -94,9 +134,9 @@ def is_ip_limit(result):
 
 def claim(address):
     print()
-    print("======================================")
+    print("=" * 38)
     print(f"CLAIM FOR ADDRESS: {address}")
-    print("======================================")
+    print("=" * 38)
 
     try:
         r = session.get(f"{FAUCET}/faucet/challenge", params={"address": address}, timeout=30)
@@ -180,13 +220,16 @@ def get_receivable(address):
     amount = info.get("amount")
     if amount is None:
         return None
-    return {"hash": source_hash, "amount": int(amount)}
+    # 🔥 پاک‌سازی hash هنگام دریافت
+    clean = clean_hash(source_hash)
+    return {"hash": clean, "amount": int(amount)}
+
 
 def wait_for_pending(index, address):
     print()
-    print("--------------------------------------")
+    print("-" * 38)
     print(f"WAITING FOR PAYMENT - INDEX {index}")
-    print("--------------------------------------")
+    print("-" * 38)
     deadline = time.time() + PENDING_TIMEOUT
     while time.time() < deadline:
         try:
@@ -204,17 +247,62 @@ def wait_for_pending(index, address):
     print(">>> PENDING TIMEOUT <<<")
     return None
 
+
 def receive(index, address, pending):
     print()
-    print("======================================")
+    print("=" * 38)
     print(f"RECEIVE INDEX {index}")
-    print("======================================")
+    print("=" * 38)
 
     acc = derive_account(index)
     source_hash = pending["hash"]
     amount = pending["amount"]
+    
+    # ============================================================
+    # 🔥 FIX: پاک‌سازی نهایی hash
+    # ============================================================
+    print(f"source_hash (before): {repr(source_hash)}")
+    
+    # تبدیل bytes به string
+    if isinstance(source_hash, bytes):
+        source_hash = source_hash.decode("utf-8", errors="ignore")
+    
+    # فقط کاراکترهای hex
+    source_hash = "".join(c for c in str(source_hash) if c in "0123456789abcdefABCDEF")
+    
+    print(f"source_hash (after):  {repr(source_hash)}")
+    print(f"source_hash length:   {len(source_hash)}")
+    print(f"amount:               {amount} raw")
+    
+    # بررسی طول hash
+    if len(source_hash) != 64:
+        raise RuntimeError(f"Invalid hash length: {len(source_hash)} (expected 64). Hash: {repr(source_hash)}")
+    
+    # تست تبدیل به bytes
+    try:
+        hash_bytes = bytes.fromhex(source_hash)
+        print(f"hash_bytes length: {len(hash_bytes)} bytes")
+    except ValueError as e:
+        raise RuntimeError(f"Cannot convert hash to bytes: {e}. Hash: {repr(source_hash)}")
+    # ============================================================
 
-    rb = acc.receive(hash_=source_hash, raw_amt=amount)
+    # تلاش اول: با string
+    rb = None
+    try:
+        print("Trying acc.receive(hash_=str, ...)...")
+        rb = acc.receive(hash_=source_hash, raw_amt=amount)
+        print("✅ Success with string hash")
+    except Exception as e:
+        print(f"❌ Failed with string hash: {e}")
+        
+        # تلاش دوم: با bytes
+        try:
+            print("Trying acc.receive(hash_=bytes, ...)...")
+            rb = acc.receive(hash_=hash_bytes, raw_amt=amount)
+            print("✅ Success with bytes hash")
+        except Exception as e2:
+            raise RuntimeError(f"Both attempts failed. str: {e}, bytes: {e2}")
+    
     block = dict(rb.dict_)
     previous = block.get("previous", "0" * 64)
 
@@ -269,9 +357,9 @@ def final_balance(items):
         return
 
     print()
-    print("======================================")
+    print("=" * 38)
     print("FINAL BALANCES")
-    print("======================================")
+    print("=" * 38)
 
     addresses = [item["address"] for item in items]
     result = rpc({"action": "accounts_balances", "accounts": addresses, "include_only_confirmed": "false"})
@@ -290,9 +378,9 @@ def final_balance(items):
         print(f"pending:    {pending_raw} raw = {raw_to_xno(pending_raw)} XNO")
 
     print()
-    print("--------------------------------------")
+    print("-" * 38)
     print(f"TOTAL: {raw_to_xno(total_raw)} XNO")
-    print("--------------------------------------")
+    print("-" * 38)
 
 
 # ============================================================
@@ -300,9 +388,9 @@ def final_balance(items):
 # ============================================================
 
 print()
-print("======================================")
+print("=" * 38)
 print(" FEELLESS402 CLAIM + RECEIVE")
-print("======================================")
+print("=" * 38)
 print()
 print(f"Targets: {TARGETS}")
 print(f"SEED: {SEED[:5]}... (hidden)")
@@ -316,9 +404,9 @@ for target in TARGETS:
 
     try:
         print()
-        print("======================================")
+        print("=" * 38)
         print(f"PROCESSING {addr} (index {idx})")
-        print("======================================")
+        print("=" * 38)
 
         status = claim(addr)
 
@@ -327,7 +415,6 @@ for target in TARGETS:
             successful.append(item)
             print(f">>> SUCCESSFUL CLAIM for {addr}")
 
-            # Wait for the transaction to arrive, then receive it
             pending = wait_for_pending(idx, addr)
             if pending:
                 receive(idx, addr, pending)
@@ -364,7 +451,7 @@ else:
     print("\nNo successful claims.")
 
 print()
-print("======================================")
+print("=" * 38)
 print("DONE")
-print("======================================")
+print("=" * 38)
 PY
