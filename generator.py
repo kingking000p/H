@@ -67,8 +67,13 @@ GITHUB_OWNER = "forgotenmywin"
 GITHUB_REPO = "K"
 GITHUB_REF = "main"
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "main.yml")
+
+# 🔥 توکن اصلی برای روشن کردن سرورها + همه کارهای مخزن K
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+
+# 🔥 توکن دوم فقط برای حذف آدرس‌ها از مخزن kingking000p/H
 GG_TOKEN = os.environ.get("GG_TOKEN")
+
 GITHUB_API = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
 
@@ -94,11 +99,23 @@ def fail(message: str):
 
 
 def github_headers():
+    """هدرهای مربوط به GITHUB_TOKEN (برای مخزن K)"""
     if not GITHUB_TOKEN:
         fail("GITHUB_TOKEN is not set")
     return {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    }
+
+
+def gg_headers():
+    """هدرهای مربوط به GG_TOKEN (فقط برای مخزن H)"""
+    if not GG_TOKEN:
+        fail("GG_TOKEN is not set")
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GG_TOKEN}",
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
     }
 
@@ -125,22 +142,18 @@ def save_to_blacklist(addresses):
 
 
 # ============================================================
-# DELETE USED ADDRESSES
+# DELETE USED ADDRESSES (with GG_TOKEN - repo H)
 # ============================================================
 
 def delete_used_addresses_from_github(addresses_to_remove):
     log_separator()
-    log_info("DELETING USED ADDRESSES FROM GITHUB")
+    log_info("DELETING USED ADDRESSES FROM GITHUB (using GG_TOKEN)")
     log_separator()
     addresses_url = "https://api.github.com/repos/kingking000p/H/contents/addresses.txt"
     if not GG_TOKEN:
         log_error("GG_TOKEN is not set, skipping deletion")
         return False
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {GG_TOKEN}",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
-    }
+    headers = gg_headers()
     try:
         response = requests.get(addresses_url, headers=headers)
         if response.status_code != 200:
@@ -193,7 +206,7 @@ def delete_used_addresses_from_github(addresses_to_remove):
 
 
 # ============================================================
-# WORKFLOW HELPERS
+# WORKFLOW HELPERS (all using GITHUB_TOKEN - repo K)
 # ============================================================
 
 def cancel_workflow(run_id):
@@ -247,41 +260,58 @@ def generate_script_for_batch(batch, batch_index):
 
 
 def trigger_workflow_with_inputs(batch_id):
-    """روشن کردن سرور - با GITHUB_TOKEN"""
+    """🔥 روشن کردن سرور با GITHUB_TOKEN (نه GG_TOKEN)"""
     dispatch_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     dispatch_payload = {
         "ref": GITHUB_REF,
-        "inputs": {"batch_id": batch_id}
+        "inputs": {"batch_id": str(batch_id)}
     }
+    
+    log_debug(f"[BATCH {batch_id}] POST {dispatch_url}")
+    log_debug(f"[BATCH {batch_id}] Payload: {dispatch_payload}")
+    
     try:
-        response = requests.post(dispatch_url, headers=github_headers(), json=dispatch_payload, timeout=30)
+        response = requests.post(
+            dispatch_url,
+            headers=github_headers(),   # 🔥 GITHUB_TOKEN
+            json=dispatch_payload,
+            timeout=30
+        )
+        log_debug(f"[BATCH {batch_id}] Response: HTTP {response.status_code}")
+        if response.status_code not in (200, 204):
+            log_error(f"[BATCH {batch_id}] Response body: {response.text[:500]}")
         return response
+    except requests.RequestException as e:
+        log_error(f"[BATCH {batch_id}] Request exception: {e}")
+        return None
     except Exception as e:
-        log_error(f"Workflow dispatch failed: {e}")
+        log_error(f"[BATCH {batch_id}] Unexpected exception: {e}")
         return None
 
 
 def get_run_id_for_batch(batch_id):
-    """گرفتن Run ID بر اساس batch_id از inputs"""
+    """
+    جدیدترین run را برمی‌گرداند.
+    این تابع با GITHUB_TOKEN اجرا می‌شود.
+    """
     runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     try:
         response = requests.get(
             runs_url,
             headers=github_headers(),
-            params={"branch": GITHUB_REF, "per_page": 20},
+            params={"branch": GITHUB_REF, "per_page": 30},
             timeout=30
         )
         if response.status_code == 200:
             runs = response.json().get("workflow_runs", [])
-            for run in runs:
-                # چک کنیم که run مربوط به همین batch_id هست
-                run_name = run.get("name", "") or ""
-                display_title = run.get("display_title", "") or ""
-                if str(batch_id) in run_name or str(batch_id) in display_title:
-                    return run.get("id")
-            # اگه پیدا نشد، جدیدترین رو برگردون
-            if runs:
-                return runs[0].get("id")
+            # مرتب‌سازی بر اساس زمان (جدیدترین اول)
+            runs_sorted = sorted(
+                runs,
+                key=lambda r: r.get("created_at", ""),
+                reverse=True
+            )
+            if runs_sorted:
+                return runs_sorted[0].get("id")
     except Exception as e:
         log_error(f"Error getting run_id for batch {batch_id}: {e}")
     return None
@@ -292,7 +322,7 @@ def get_run_id_for_batch(batch_id):
 # ============================================================
 
 def get_all_txt_files():
-    """لیست همه فایل‌های .txt در پوشه logs را برمی‌گرداند."""
+    """لیست همه فایل‌های .txt در پوشه logs (با GITHUB_TOKEN)"""
     url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
     try:
         response = requests.get(url, headers=github_headers(), timeout=30)
@@ -311,7 +341,7 @@ def get_all_txt_files():
 
 
 def get_file_content(file_name):
-    """محتوای یک فایل .txt در پوشه logs را می‌خواند."""
+    """محتوای یک فایل .txt در پوشه logs"""
     url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}/{file_name}"
     try:
         response = requests.get(url, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
@@ -341,10 +371,9 @@ def extract_endpoint_and_token(content):
 
 
 def get_endpoint_configs():
-    """همه فایل‌های .txt در پوشه logs را اسکن می‌کند."""
+    """اسکن همه فایل‌های .txt در logs/"""
     all_files = get_all_txt_files()
     
-    # مرتب‌سازی: logs_*.txt اول
     logs_files = sorted([f for f in all_files if f["name"].startswith("logs_")], key=lambda x: x["name"])
     other_files = sorted([f for f in all_files if not f["name"].startswith("logs_")], key=lambda x: x["name"])
     
@@ -368,12 +397,12 @@ def get_endpoint_configs():
 
 
 # ============================================================
-# DELETE ALL TXT FILES
+# DELETE ALL TXT FILES (with GITHUB_TOKEN - repo K)
 # ============================================================
 
 def delete_all_txt_files():
     log_separator()
-    log_info("🗑️ DELETING ALL .txt FILES FROM REPOSITORY")
+    log_info("🗑️ DELETING ALL .txt FILES FROM REPOSITORY K")
     log_separator()
     deleted_count = 0
     failed_count = 0
@@ -489,42 +518,32 @@ log_info(f"✅ Total address batches: {total_address_batches} (each with {BATCH_
 
 
 # ============================================================
-# 🔥 SECTION 2 - FIRST: TURN ON ALL SERVERS (WITH GG_TOKEN)
+# STEP 1: TURN ON ALL SERVERS (using GITHUB_TOKEN)
 # ============================================================
 
 log_separator()
-log_info(f"🔥 STEP 1: TURNING ON {total_address_batches} SERVERS")
+log_info(f"🔥 STEP 1: TURNING ON {total_address_batches} SERVERS (using GITHUB_TOKEN)")
 log_separator()
 
-# ساخت اسکریپت‌ها و روشن کردن همه سرورها با هم
+# ساخت اسکریپت‌ها
 log_info("📝 Generating scripts for all batches...")
 for idx, batch in enumerate(address_batches, start=1):
     script_file = generate_script_for_batch(batch, idx)
     log_info(f"   ✅ Script {idx}: {script_file.name} ({script_file.stat().st_size} bytes)")
 
-log_info(f"🔥 Triggering {total_address_batches} workflows (servers)...")
+# 🔥 روشن کردن همه سرورها با GITHUB_TOKEN
+log_info(f"🔥 Triggering {total_address_batches} workflows (servers) with GITHUB_TOKEN...")
 
-# روشن کردن همه سرورها با هم
-batch_run_ids = {}
-
-with ThreadPoolExecutor(max_workers=min(total_address_batches, 10)) as executor:
-    futures = {}
-    for idx, batch in enumerate(address_batches, start=1):
-        log_info(f"[BATCH {idx}] 🔥 Triggering workflow...")
-        future = executor.submit(trigger_workflow_with_inputs, idx)
-        futures[future] = idx
-    
-    for future in as_completed(futures):
-        batch_idx = futures[future]
-        try:
-            response = future.result()
-            if response and response.status_code in (200, 204):
-                log_info(f"[BATCH {batch_idx}] ✅ Workflow triggered (HTTP {response.status_code})")
-            else:
-                status_code = response.status_code if response else "None"
-                log_error(f"[BATCH {batch_idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
-        except Exception as e:
-            log_error(f"[BATCH {batch_idx}] ❌ Error triggering workflow: {e}")
+# ⚠️ نکته: ترتیب اجرا رو حفظ می‌کنیم تا run_id درست بگیریم
+for idx in range(1, total_address_batches + 1):
+    log_info(f"[BATCH {idx}] 🔥 Triggering workflow...")
+    response = trigger_workflow_with_inputs(idx)
+    if response and response.status_code in (200, 204):
+        log_info(f"[BATCH {idx}] ✅ Workflow triggered (HTTP {response.status_code})")
+    else:
+        status_code = response.status_code if response else "None"
+        log_error(f"[BATCH {idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
+    time.sleep(2)  # فاصله کوتاه بین درخواست‌ها
 
 # صبر ۳ ثانیه تا GitHub Run IDها ثبت بشن
 log_info("⏳ Waiting 3 seconds for GitHub to register runs...")
@@ -532,6 +551,7 @@ time.sleep(3)
 
 # گرفتن Run ID هر بچ
 log_info("📌 Getting Run IDs for all batches...")
+batch_run_ids = {}
 for idx in range(1, total_address_batches + 1):
     run_id = get_run_id_for_batch(idx)
     if run_id:
@@ -546,7 +566,7 @@ log_separator()
 
 
 # ============================================================
-# 🔥 SECTION 3 - WAIT 60 SECONDS FOR SERVERS TO START
+# STEP 2: WAIT 60 SECONDS FOR SERVERS TO START
 # ============================================================
 
 log_separator()
@@ -564,7 +584,7 @@ log_info("✅ 60 seconds completed. Servers should be ready now.")
 
 
 # ============================================================
-# 🔥 SECTION 4 - NOW READ logs/ DIRECTORY FOR ENDPOINT CONFIGS
+# STEP 3: READ logs/ DIRECTORY FOR ENDPOINT CONFIGS
 # ============================================================
 
 log_separator()
@@ -580,7 +600,7 @@ else:
 
 
 # ============================================================
-# SECTION 5 - MATCH BATCHES WITH CONFIGS & PROCESS
+# STEP 4: MATCH BATCHES WITH CONFIGS
 # ============================================================
 
 log_separator()
@@ -590,7 +610,6 @@ log_separator()
 log_info(f"Address batches: {total_address_batches}")
 log_info(f"Endpoint configs: {len(endpoint_configs)}")
 
-# تعیین تعداد قابل پردازش
 processable_count = min(total_address_batches, len(endpoint_configs))
 
 if processable_count == 0:
@@ -608,7 +627,7 @@ log_info(f"✅ Will process {processable_count} batches")
 
 
 # ============================================================
-# SECTION 6 - PROCESS BATCHES WITH THEIR CONFIGS
+# STEP 5: PROCESS BATCHES WITH THEIR CONFIGS
 # ============================================================
 
 log_separator()
@@ -718,9 +737,9 @@ def process_single_batch(batch_index, batch, config, config_index, run_id):
         batch_result["successful"] = script_successful
         batch_result["status"] = script_status
         
-        # پاک کردن آدرس‌ها
+        # پاک کردن آدرس‌ها با GG_TOKEN
         if script_successful:
-            log_info(f"[BATCH {batch_index}] ✅ Deleting addresses from GitHub...")
+            log_info(f"[BATCH {batch_index}] ✅ Deleting addresses from GitHub (with GG_TOKEN)...")
             used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
             delete_used_addresses_from_github(used_addresses)
         else:
@@ -760,11 +779,11 @@ with ThreadPoolExecutor(max_workers=min(processable_count, 10)) as executor:
 
 
 # ============================================================
-# SECTION 7 - SHUT DOWN ALL SERVERS (INCLUDING UNPROCESSED)
+# STEP 6: SHUT DOWN ALL SERVERS
 # ============================================================
 
 log_separator()
-log_info("🛑 STEP 6: SHUTTING DOWN ALL SERVERS")
+log_info("🛑 STEP 6: SHUTTING DOWN ALL SERVERS (using GITHUB_TOKEN)")
 log_separator()
 
 for idx in range(1, total_address_batches + 1):
@@ -777,7 +796,7 @@ for idx in range(1, total_address_batches + 1):
 
 
 # ============================================================
-# DELETE ALL .txt FILES
+# STEP 7: DELETE ALL .txt FILES
 # ============================================================
 
 log_separator()
