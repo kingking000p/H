@@ -67,13 +67,8 @@ GITHUB_OWNER = "forgotenmywin"
 GITHUB_REPO = "K"
 GITHUB_REF = "main"
 WORKFLOW_FILE = os.environ.get("WORKFLOW_FILE", "main.yml")
-
-# 🔥 توکن اصلی برای روشن کردن سرورها + همه کارهای مخزن K
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-
-# 🔥 توکن دوم فقط برای حذف آدرس‌ها از مخزن kingking000p/H
 GG_TOKEN = os.environ.get("GG_TOKEN")
-
 GITHUB_API = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
 
@@ -99,7 +94,6 @@ def fail(message: str):
 
 
 def github_headers():
-    """هدرهای مربوط به GITHUB_TOKEN (برای مخزن K)"""
     if not GITHUB_TOKEN:
         fail("GITHUB_TOKEN is not set")
     return {
@@ -110,7 +104,6 @@ def github_headers():
 
 
 def gg_headers():
-    """هدرهای مربوط به GG_TOKEN (فقط برای مخزن H)"""
     if not GG_TOKEN:
         fail("GG_TOKEN is not set")
     return {
@@ -206,7 +199,7 @@ def delete_used_addresses_from_github(addresses_to_remove):
 
 
 # ============================================================
-# WORKFLOW HELPERS (all using GITHUB_TOKEN - repo K)
+# WORKFLOW HELPERS (with GITHUB_TOKEN - repo K)
 # ============================================================
 
 def cancel_workflow(run_id):
@@ -260,7 +253,7 @@ def generate_script_for_batch(batch, batch_index):
 
 
 def trigger_workflow_with_inputs(batch_id):
-    """🔥 روشن کردن سرور با GITHUB_TOKEN (نه GG_TOKEN)"""
+    """🔥 روشن کردن سرور با GITHUB_TOKEN و batch_id"""
     dispatch_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     dispatch_payload = {
         "ref": GITHUB_REF,
@@ -273,7 +266,7 @@ def trigger_workflow_with_inputs(batch_id):
     try:
         response = requests.post(
             dispatch_url,
-            headers=github_headers(),   # 🔥 GITHUB_TOKEN
+            headers=github_headers(),
             json=dispatch_payload,
             timeout=30
         )
@@ -291,8 +284,7 @@ def trigger_workflow_with_inputs(batch_id):
 
 def get_run_id_for_batch(batch_id):
     """
-    جدیدترین run را برمی‌گرداند.
-    این تابع با GITHUB_TOKEN اجرا می‌شود.
+    جدیدترین run که با این batch_id اجرا شده رو برمی‌گردونه
     """
     runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     try:
@@ -310,6 +302,15 @@ def get_run_id_for_batch(batch_id):
                 key=lambda r: r.get("created_at", ""),
                 reverse=True
             )
+            # دنبال runی بگرد که توضیحاتش شامل batch_id باشه
+            for run in runs_sorted:
+                display_title = run.get("display_title", "") or ""
+                name = run.get("name", "") or ""
+                # اگه run_name شامل "batch-N" بود
+                if f"batch-{batch_id}" in display_title or f"batch-{batch_id}" in name:
+                    return run.get("id")
+            
+            # اگه پیدا نشد، جدیدترین run رو برگردون
             if runs_sorted:
                 return runs_sorted[0].get("id")
     except Exception as e:
@@ -322,7 +323,7 @@ def get_run_id_for_batch(batch_id):
 # ============================================================
 
 def get_all_txt_files():
-    """لیست همه فایل‌های .txt در پوشه logs (با GITHUB_TOKEN)"""
+    """لیست همه فایل‌های .txt در پوشه logs"""
     url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
     try:
         response = requests.get(url, headers=github_headers(), timeout=30)
@@ -371,25 +372,40 @@ def extract_endpoint_and_token(content):
 
 
 def get_endpoint_configs():
-    """اسکن همه فایل‌های .txt در logs/"""
+    """اسکن همه فایل‌های .txt در logs/ و استخراج endpoint/token"""
     all_files = get_all_txt_files()
     
-    logs_files = sorted([f for f in all_files if f["name"].startswith("logs_")], key=lambda x: x["name"])
-    other_files = sorted([f for f in all_files if not f["name"].startswith("logs_")], key=lambda x: x["name"])
+    # مرتب‌سازی: فایل‌های batch-1 اول، بعد batch-2 و ...
+    def sort_key(f):
+        name = f["name"]
+        match = re.search(r"batch-(\d+)", name)
+        if match:
+            return (0, int(match.group(1)))
+        match2 = re.search(r"logs_(\d+)", name)
+        if match2:
+            return (1, int(match2.group(1)))
+        return (2, name)
+    
+    sorted_files = sorted(all_files, key=sort_key)
     
     configs = []
-    for file_info in logs_files + other_files:
+    for file_info in sorted_files:
         file_name = file_info["name"]
         content, _ = get_file_content(file_name)
         if content:
             endpoint, token = extract_endpoint_and_token(content)
             if endpoint and token:
-                log_info(f"✅ Found config in {LOGS_DIR}/{file_name}")
+                # استخراج batch_id از اسم فایل
+                match = re.search(r"batch-(\d+)", file_name)
+                batch_id_in_file = int(match.group(1)) if match else None
+                
+                log_info(f"✅ Found config in {LOGS_DIR}/{file_name} (batch_id: {batch_id_in_file})")
                 configs.append({
                     "file_name": file_name,
                     "endpoint": endpoint,
                     "token": token,
-                    "sha": file_info.get("sha")
+                    "sha": file_info.get("sha"),
+                    "batch_id_in_file": batch_id_in_file
                 })
     
     log_info(f"📊 Total endpoint configs found in {LOGS_DIR}: {len(configs)}")
@@ -534,7 +550,6 @@ for idx, batch in enumerate(address_batches, start=1):
 # 🔥 روشن کردن همه سرورها با GITHUB_TOKEN
 log_info(f"🔥 Triggering {total_address_batches} workflows (servers) with GITHUB_TOKEN...")
 
-# ⚠️ نکته: ترتیب اجرا رو حفظ می‌کنیم تا run_id درست بگیریم
 for idx in range(1, total_address_batches + 1):
     log_info(f"[BATCH {idx}] 🔥 Triggering workflow...")
     response = trigger_workflow_with_inputs(idx)
@@ -543,7 +558,7 @@ for idx in range(1, total_address_batches + 1):
     else:
         status_code = response.status_code if response else "None"
         log_error(f"[BATCH {idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
-    time.sleep(2)  # فاصله کوتاه بین درخواست‌ها
+    time.sleep(2)  # فاصله بین درخواست‌ها
 
 # صبر ۳ ثانیه تا GitHub Run IDها ثبت بشن
 log_info("⏳ Waiting 3 seconds for GitHub to register runs...")
