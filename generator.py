@@ -87,7 +87,6 @@ TRIGGER_DELAY_SECONDS = 15
 ENDPOINT_CHECK_RETRIES = 5
 ENDPOINT_CHECK_DELAY = 20
 
-# تنظیمات تقسیم اسکریپت (اجرای پس‌زمینه)
 SCRIPT_EXECUTION_WAIT = 180
 RESULT_CHECK_RETRIES = 10
 RESULT_CHECK_DELAY = 10
@@ -177,6 +176,21 @@ def wait_for_endpoint_alive(endpoint, token, max_retries=None, delay=None):
             time.sleep(delay)
     
     return False
+
+
+def send_command_to_server(endpoint, token, command, timeout=30):
+    """🔥 ارسال دستور به سرور و برگرداندن پاسخ"""
+    try:
+        response = requests.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"command": command},
+            timeout=timeout
+        )
+        return response
+    except Exception as e:
+        log_error(f"send_command_to_server failed: {e}")
+        return None
 
 
 # ============================================================
@@ -413,10 +427,6 @@ def extract_endpoint_and_token(content):
 
 
 def get_endpoint_configs(valid_run_ids=None):
-    """
-    🔥 اسکن فایل‌های .txt و برگرداندن configها
-    هر config شامل batch_id_in_file هست که برای matching استفاده میشه
-    """
     all_files = get_all_txt_files()
     
     if valid_run_ids:
@@ -472,9 +482,6 @@ def get_endpoint_configs(valid_run_ids=None):
 
 
 def get_config_for_batch_id(configs, batch_id):
-    """
-    🔥 پیدا کردن config مناسب برای یک batch_id خاص
-    """
     for config in configs:
         if config["batch_id_in_file"] == batch_id:
             return config
@@ -725,7 +732,6 @@ if not endpoint_configs:
     log_warning("⚠️ No endpoint configs found for current Run IDs.")
 else:
     log_info(f"✅ Found {len(endpoint_configs)} endpoint configs")
-    # 🔥 نمایش mapping
     log_info("📋 Config mapping (batch_id_in_file → file_name):")
     for config in endpoint_configs:
         log_info(f"   batch-{config['batch_id_in_file']} → {config['file_name']}")
@@ -766,7 +772,7 @@ else:
 
 
 # ============================================================
-# STEP 4: MATCH BATCHES WITH CONFIGS (BY batch_id_in_file)
+# STEP 4: MATCH BATCHES WITH CONFIGS
 # ============================================================
 
 log_separator()
@@ -777,7 +783,6 @@ log_separator()
 log_info(f"Address batches: {total_address_batches}")
 log_info(f"Endpoint configs: {len(endpoint_configs)}")
 
-# 🔥 ساخت لیست batch_config_pairs با matching بر اساس batch_id
 batch_config_pairs = []
 for idx in range(1, total_address_batches + 1):
     config = get_config_for_batch_id(endpoint_configs, idx)
@@ -797,7 +802,7 @@ log_info(f"✅ Will process {len(batch_config_pairs)} batches")
 
 
 # ============================================================
-# STEP 5: PROCESS BATCHES SEQUENTIALLY
+# STEP 5: PROCESS BATCHES
 # ============================================================
 
 log_separator()
@@ -807,6 +812,9 @@ log_info(f"Send & Run Enabled: {ENABLE_SEND_AND_RUN}")
 
 
 def process_single_batch(batch_index, batch, config, run_id):
+    """
+    🔥 پردازش یک batch با endpoint/token مخصوص خودش
+    """
     batch_result = {
         "batch": batch_index,
         "run_id": run_id,
@@ -819,7 +827,9 @@ def process_single_batch(batch_index, batch, config, run_id):
     }
     
     try:
+        log_separator()
         log_info(f"[BATCH {batch_index}] 🚀 Starting... (config from {config['file_name']})")
+        log_separator()
         
         for pos, item in enumerate(batch, start=1):
             log_info(f"[BATCH {batch_index}]   TARGET{pos}: index={item['index']}, address={item['address'][:30]}...")
@@ -842,8 +852,11 @@ def process_single_batch(batch_index, batch, config, run_id):
         script_status = "unknown"
         
         if ENABLE_SEND_AND_RUN:
+            log_separator()
             log_info(f"[BATCH {batch_index}] 🚀 Sending and running script...")
+            log_separator()
             
+            # خواندن اسکریپت
             try:
                 with open(script_file, "rb") as f:
                     script_bytes = f.read()
@@ -854,109 +867,139 @@ def process_single_batch(batch_index, batch, config, run_id):
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            # 🔥 STEP A: ارسال اسکریپت به سرور
+            # === STEP A: ارسال اسکریپت ===
+            log_info(f"[BATCH {batch_index}] 📤 STEP A: Uploading script...")
             payload1 = {"command": f"echo '{b64_data}' > /tmp/script_{batch_index}.b64"}
+            response1 = send_command_to_server(endpoint, token, payload1["command"], timeout=60)
             
-            try:
-                response1 = requests.post(
-                    endpoint,
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                    json=payload1,
-                    timeout=60
-                )
-                log_info(f"[BATCH {batch_index}] STEP 1 (Upload script): HTTP {response1.status_code}")
-            except Exception as e:
-                log_error(f"[BATCH {batch_index}] STEP 1 failed: {e}")
-                batch_result["error"] = "Step 1 failed"
+            if not response1 or response1.status_code != 200:
+                status = response1.status_code if response1 else "None"
+                log_error(f"[BATCH {batch_index}] STEP A failed: HTTP {status}")
+                batch_result["error"] = "Step A failed"
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            # 🔥 STEP B: اجرای اسکریپت در پس‌زمینه (سریع برمی‌گردد، از Cloudflare timeout جلوگیری می‌کند)
-            payload2 = {
-                "command": (
-                    f"nohup bash -c 'base64 -d /tmp/script_{batch_index}.b64 | bash > "
-                    f"/tmp/result_{batch_index}.txt 2>&1; echo DONE > /tmp/done_{batch_index}.flag' "
-                    f"> /dev/null 2>&1 & echo 'STARTED'"
-                )
-            }
+            log_info(f"[BATCH {batch_index}] ✅ STEP A: HTTP {response1.status_code}")
             
-            try:
-                response2 = requests.post(
-                    endpoint,
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                    json=payload2,
-                    timeout=30
-                )
-                log_info(f"[BATCH {batch_index}] STEP 2 (Start bg script): HTTP {response2.status_code}")
-            except Exception as e:
-                log_error(f"[BATCH {batch_index}] STEP 2 failed: {e}")
-                batch_result["error"] = "Step 2 failed"
+            # تأیید آپلود
+            check_upload = send_command_to_server(endpoint, token, f"ls -la /tmp/script_{batch_index}.b64", timeout=15)
+            if check_upload and check_upload.status_code == 200:
+                log_info(f"[BATCH {batch_index}] 📁 Upload check: {check_upload.text[:200]}")
+            
+            # === STEP B: اجرای اسکریپت در پس‌زمینه ===
+            log_info(f"[BATCH {batch_index}] 🚀 STEP B: Starting script in background...")
+            
+            # پاک کردن فایل‌های قبلی
+            cleanup_cmd = f"rm -f /tmp/result_{batch_index}.txt /tmp/done_{batch_index}.flag /tmp/error_{batch_index}.txt"
+            send_command_to_server(endpoint, token, cleanup_cmd, timeout=15)
+            
+            # دستور اجرا در پس‌زمینه
+            bg_command = (
+                f"cd /tmp && "
+                f"base64 -d /tmp/script_{batch_index}.b64 > /tmp/script_{batch_index}.sh && "
+                f"chmod +x /tmp/script_{batch_index}.sh && "
+                f"nohup bash /tmp/script_{batch_index}.sh > /tmp/result_{batch_index}.txt 2>&1 ; "
+                f"echo $? > /tmp/exit_code_{batch_index}.txt ; "
+                f"touch /tmp/done_{batch_index}.flag & "
+                f"echo 'STARTED'"
+            )
+            
+            response2 = send_command_to_server(endpoint, token, bg_command, timeout=30)
+            
+            if not response2 or response2.status_code != 200:
+                status = response2.status_code if response2 else "None"
+                log_error(f"[BATCH {batch_index}] STEP B failed: HTTP {status}")
+                batch_result["error"] = "Step B failed"
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            # 🔥 STEP C: صبر کن تا اسکریپت تمام شود (چک کردن فایل DONE)
-            log_info(f"[BATCH {batch_index}] ⏳ Waiting up to {SCRIPT_EXECUTION_WAIT}s for script to complete...")
+            log_info(f"[BATCH {batch_index}] ✅ STEP B: HTTP {response2.status_code}")
+            log_info(f"[BATCH {batch_index}] 📄 Response: {response2.text[:200]}")
+            
+            # === STEP C: صبر و بررسی وضعیت ===
+            log_info(f"[BATCH {batch_index}] ⏳ STEP C: Waiting for script to complete (max {SCRIPT_EXECUTION_WAIT}s)...")
             
             start_wait = time.time()
             completed = False
+            last_status = ""
             
             while time.time() - start_wait < SCRIPT_EXECUTION_WAIT:
                 elapsed = int(time.time() - start_wait)
-                check_payload = {"command": f"ls /tmp/done_{batch_index}.flag 2>/dev/null && echo EXISTS || echo NOT_YET"}
                 
-                try:
-                    check_resp = requests.post(
-                        endpoint,
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json=check_payload,
-                        timeout=20
-                    )
-                    if "EXISTS" in check_resp.text:
-                        log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s")
+                check_cmd = (
+                    f"if [ -f /tmp/done_{batch_index}.flag ]; then "
+                    f"echo 'DONE'; "
+                    f"cat /tmp/exit_code_{batch_index}.txt 2>/dev/null; "
+                    f"else echo 'NOT_YET'; fi"
+                )
+                
+                check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=20)
+                
+                if check_resp and check_resp.status_code == 200:
+                    resp_text = check_resp.text.strip()
+                    
+                    if "DONE" in resp_text:
+                        exit_code = "unknown"
+                        if "0" in resp_text:
+                            exit_code = "0"
+                        elif "1" in resp_text:
+                            exit_code = "1"
+                        
+                        log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s (exit_code: {exit_code})")
                         completed = True
                         break
-                except Exception as e:
-                    log_debug(f"[BATCH {batch_index}] Check attempt at {elapsed}s failed: {e}")
+                    else:
+                        if elapsed % 30 == 0 and elapsed > 0:
+                            log_info(f"[BATCH {batch_index}] ⏳ Still running... ({elapsed}s / {SCRIPT_EXECUTION_WAIT}s)")
+                else:
+                    log_warning(f"[BATCH {batch_index}] ⚠️ Check failed at {elapsed}s")
                 
-                log_info(f"[BATCH {batch_index}] ⏳ Still running... ({elapsed}s / {SCRIPT_EXECUTION_WAIT}s)")
                 time.sleep(RESULT_CHECK_DELAY)
             
             if not completed:
                 log_warning(f"[BATCH {batch_index}] ⚠️ Script did NOT complete within {SCRIPT_EXECUTION_WAIT}s")
             
-            # 🔥 STEP D: نتیجه را بخوان
-            log_info(f"[BATCH {batch_index}] 📖 Reading result...")
-            payload3 = {"command": f"cat /tmp/result_{batch_index}.txt 2>/dev/null || echo NO_RESULT"}
+            # === STEP D: خواندن نتیجه ===
+            log_info(f"[BATCH {batch_index}] 📖 STEP D: Reading result...")
             
             result_text = ""
             for attempt in range(1, RESULT_CHECK_RETRIES + 1):
-                try:
-                    response3 = requests.post(
-                        endpoint,
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json=payload3,
-                        timeout=30
-                    )
-                    if response3.status_code == 200:
-                        result_text = response3.text
-                        log_info(f"[BATCH {batch_index}] ✅ Result received (attempt {attempt})")
-                        break
-                    else:
-                        log_warning(f"[BATCH {batch_index}] Result read attempt {attempt}: HTTP {response3.status_code}")
-                except Exception as e:
-                    log_warning(f"[BATCH {batch_index}] Result read attempt {attempt} failed: {e}")
+                result_resp = send_command_to_server(
+                    endpoint, token,
+                    f"cat /tmp/result_{batch_index}.txt 2>/dev/null || echo 'NO_RESULT'",
+                    timeout=30
+                )
                 
-                if attempt < RESULT_CHECK_RETRIES:
+                if result_resp and result_resp.status_code == 200:
+                    result_text = result_resp.text
+                    log_info(f"[BATCH {batch_index}] ✅ Result received (attempt {attempt}, size: {len(result_text)} chars)")
+                    break
+                else:
+                    log_warning(f"[BATCH {batch_index}] ⚠️ Result read attempt {attempt} failed")
                     time.sleep(RESULT_CHECK_DELAY)
             
-            # 🔥 STEP E: بررسی نتیجه
-            if result_text and "NO_RESULT" not in result_text:
+            # === STEP E: نمایش کامل نتیجه ===
+            log_separator()
+            log_info(f"[BATCH {batch_index}] 📄 ===== FULL RESULT =====")
+            log_separator()
+            
+            if result_text:
+                # نمایش کل نتیجه (بدون truncate)
+                for line in result_text.splitlines():
+                    log_info(f"[BATCH {batch_index}] | {line}")
+            else:
+                log_warning(f"[BATCH {batch_index}] | (empty result)")
+            
+            log_separator()
+            
+            # === STEP F: بررسی موفقیت ===
+            if result_text and "NO_RESULT" not in result_text and len(result_text.strip()) > 10:
                 is_success, status = check_if_script_successful(result_text)
                 script_successful = is_success
                 script_status = status
-                log_info(f"[BATCH {batch_index}] Script status: {status}")
+                log_info(f"[BATCH {batch_index}] 🎯 Script status: {status}")
             else:
-                log_error(f"[BATCH {batch_index}] Could not read result")
+                log_error(f"[BATCH {batch_index}] ❌ Result is empty or unreadable")
                 script_status = "result_unreadable"
         else:
             log_info(f"[BATCH {batch_index}] 📝 SEND/RUN DISABLED (REPORT ONLY)")
@@ -966,21 +1009,27 @@ def process_single_batch(batch_index, batch, config, run_id):
         batch_result["successful"] = script_successful
         batch_result["status"] = script_status
         
+        # === STEP G: حذف آدرس‌ها ===
         if script_successful:
-            log_info(f"[BATCH {batch_index}] ✅ Deleting addresses from GitHub...")
+            log_separator()
+            log_info(f"[BATCH {batch_index}] ✅ Script succeeded! Deleting addresses...")
+            log_separator()
             used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
             delete_used_addresses_from_github(used_addresses)
         else:
             if script_status == "skipped":
                 log_info(f"[BATCH {batch_index}] ℹ️ Send/Run disabled. Addresses untouched.")
             else:
-                log_warning(f"[BATCH {batch_index}] ⚠️ Script NOT successful! Adding to blacklist...")
+                log_warning(f"[BATCH {batch_index}] ⚠️ Script NOT successful (status: {script_status})!")
+                log_warning(f"[BATCH {batch_index}] ⚠️ Adding addresses to blacklist...")
                 save_to_blacklist(batch_result["addresses"])
         
         log_info(f"[BATCH {batch_index}] ✅ PROCESSING COMPLETED!")
         
     except Exception as e:
         log_error(f"[BATCH {batch_index}] ❌ CRITICAL ERROR: {e}")
+        import traceback
+        log_error(f"[BATCH {batch_index}] Traceback: {traceback.format_exc()}")
         batch_result["error"] = str(e)
         save_to_blacklist(batch_result["addresses"])
     
@@ -997,7 +1046,6 @@ for pair_idx, (batch_id, config) in enumerate(batch_config_pairs):
     result = process_single_batch(batch_id, batch, config, run_id)
     batch_results.append(result)
     
-    # فاصله بین بچ‌ها
     if pair_idx < len(batch_config_pairs) - 1:
         log_info(f"⏳ Waiting 10s before next batch...")
         time.sleep(10)
