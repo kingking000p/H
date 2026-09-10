@@ -8,7 +8,6 @@ import base64
 import requests
 import datetime
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
@@ -79,14 +78,19 @@ LOGS_DIR = "logs"
 # TIMING
 # ============================================================
 
-INITIAL_WAIT_SECONDS = 180          # 🔥 افزایش از ۹۰ به ۱۸۰ (۳ دقیقه)
+INITIAL_WAIT_SECONDS = 180
 LOG_RETRY_COUNT = 20
 LOG_RETRY_DELAY = 5
 RUN_ID_WAIT_SECONDS = 5
 RUN_ID_MAX_RETRIES = 5
-TRIGGER_DELAY_SECONDS = 15          # 🔥 فاصله بین triggerها
-ENDPOINT_CHECK_RETRIES = 5          # 🔥 تعداد تلاش برای چک endpoint
-ENDPOINT_CHECK_DELAY = 20           # 🔥 فاصله بین چک‌ها
+TRIGGER_DELAY_SECONDS = 15
+ENDPOINT_CHECK_RETRIES = 5
+ENDPOINT_CHECK_DELAY = 20
+
+# تنظیمات تقسیم اسکریپت (اجرای پس‌زمینه)
+SCRIPT_EXECUTION_WAIT = 180
+RESULT_CHECK_RETRIES = 10
+RESULT_CHECK_DELAY = 10
 
 
 # ============================================================
@@ -140,9 +144,6 @@ def save_to_blacklist(addresses):
 
 
 def check_endpoint_alive(endpoint, token):
-    """
-    🔥 بررسی می‌کنه که endpoint واقعاً زنده هست یا نه
-    """
     base_url = endpoint.replace("/command", "")
     try:
         response = requests.get(
@@ -161,9 +162,6 @@ def check_endpoint_alive(endpoint, token):
 
 
 def wait_for_endpoint_alive(endpoint, token, max_retries=None, delay=None):
-    """
-    🔥 صبر می‌کنه تا endpoint زنده بشه
-    """
     if max_retries is None:
         max_retries = ENDPOINT_CHECK_RETRIES
     if delay is None:
@@ -182,7 +180,7 @@ def wait_for_endpoint_alive(endpoint, token, max_retries=None, delay=None):
 
 
 # ============================================================
-# DELETE USED ADDRESSES (with GG_TOKEN - repo H)
+# DELETE USED ADDRESSES
 # ============================================================
 
 def delete_used_addresses_from_github(addresses_to_remove):
@@ -300,7 +298,6 @@ def generate_script_for_batch(batch, batch_index):
 
 
 def trigger_workflow_with_inputs(batch_id):
-    """🔥 روشن کردن سرور با GITHUB_TOKEN و batch_id"""
     dispatch_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     dispatch_payload = {
         "ref": GITHUB_REF,
@@ -345,7 +342,6 @@ def trigger_workflow_with_inputs(batch_id):
 
 
 def get_latest_unique_run_id(existing_run_ids):
-    """گرفتن جدیدترین run_id که تکراری نباشه"""
     runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     try:
         response = requests.get(
@@ -370,7 +366,6 @@ def get_latest_unique_run_id(existing_run_ids):
 # ============================================================
 
 def get_all_txt_files():
-    """لیست همه فایل‌های .txt در پوشه logs"""
     url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
     try:
         response = requests.get(url, headers=github_headers(), timeout=30)
@@ -389,7 +384,6 @@ def get_all_txt_files():
 
 
 def get_file_content(file_name):
-    """محتوای یک فایل .txt در پوشه logs"""
     url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}/{file_name}"
     try:
         response = requests.get(url, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
@@ -420,7 +414,8 @@ def extract_endpoint_and_token(content):
 
 def get_endpoint_configs(valid_run_ids=None):
     """
-    🔥 اسکن فایل‌های .txt در logs/ با فیلتر Run ID
+    🔥 اسکن فایل‌های .txt و برگرداندن configها
+    هر config شامل batch_id_in_file هست که برای matching استفاده میشه
     """
     all_files = get_all_txt_files()
     
@@ -476,15 +471,23 @@ def get_endpoint_configs(valid_run_ids=None):
     return configs
 
 
+def get_config_for_batch_id(configs, batch_id):
+    """
+    🔥 پیدا کردن config مناسب برای یک batch_id خاص
+    """
+    for config in configs:
+        if config["batch_id_in_file"] == batch_id:
+            return config
+    return None
+
+
 def delete_all_txt_files():
-    """حذف همه فایل‌های .txt از پوشه logs و ریشه"""
     log_separator()
     log_info("🗑️ DELETING ALL .txt FILES FROM REPOSITORY K")
     log_separator()
     deleted_count = 0
     failed_count = 0
     
-    # پوشه logs
     try:
         url_logs = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{LOGS_DIR}"
         response = requests.get(url_logs, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
@@ -514,7 +517,6 @@ def delete_all_txt_files():
     except Exception as e:
         log_warning(f"⚠️ Error listing {LOGS_DIR}/: {e}")
     
-    # ریشه
     try:
         url_root = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/"
         response = requests.get(url_root, headers=github_headers(), params={"ref": GITHUB_REF}, timeout=30)
@@ -595,7 +597,7 @@ log_info(f"✅ Total address batches: {total_address_batches} (each with {BATCH_
 
 
 # ============================================================
-# STEP 0: CLEAN UP OLD LOG FILES (BEFORE STARTING)
+# STEP 0: CLEAN UP OLD LOG FILES
 # ============================================================
 
 log_separator()
@@ -606,22 +608,19 @@ delete_all_txt_files()
 
 
 # ============================================================
-# STEP 1: TURN ON ALL SERVERS (SEQUENTIALLY WITH UNIQUE RUN ID)
+# STEP 1: TURN ON ALL SERVERS
 # ============================================================
 
 log_separator()
 log_info(f"🔥 STEP 1: TURNING ON {total_address_batches} SERVERS SEQUENTIALLY")
 log_separator()
 
-# ساخت اسکریپت‌ها
 log_info("📝 Generating scripts for all batches...")
 for idx, batch in enumerate(address_batches, start=1):
     script_file = generate_script_for_batch(batch, idx)
     log_info(f"   ✅ Script {idx}: {script_file.name} ({script_file.stat().st_size} bytes)")
 
-# 🔥 روشن کردن سرورها یکی‌یکی + گرفتن run_id اختصاصی
 log_info(f"🔥 Triggering {total_address_batches} workflows ONE BY ONE...")
-log_info(f"   (with unique Run ID tracking)")
 
 batch_run_ids = {}
 used_run_ids = set()
@@ -664,20 +663,14 @@ for idx in range(1, total_address_batches + 1):
         log_info(f"[BATCH {idx}] ⏳ Waiting {TRIGGER_DELAY_SECONDS}s before next batch...")
         time.sleep(TRIGGER_DELAY_SECONDS)
 
-# نمایش خلاصه run_idها
 log_separator()
 log_info("📌 RUN ID SUMMARY:")
 for idx in sorted(batch_run_ids.keys()):
     log_info(f"   Batch {idx}: Run ID = {batch_run_ids[idx]}")
 
-# چک تکراری بودن
 all_run_ids = list(batch_run_ids.values())
 if len(all_run_ids) != len(set(all_run_ids)):
     log_warning("⚠️ Duplicate Run IDs detected!")
-    for run_id in set(all_run_ids):
-        count = all_run_ids.count(run_id)
-        if count > 1:
-            log_warning(f"   Run ID {run_id} appears {count} times")
 else:
     log_info("✅ All Run IDs are unique!")
 
@@ -687,12 +680,11 @@ log_separator()
 
 
 # ============================================================
-# STEP 2: WAIT FOR SERVERS TO START (INCREASED TO 180 SECONDS)
+# STEP 2: WAIT FOR SERVERS TO START
 # ============================================================
 
 log_separator()
 log_info(f"⏳ STEP 2: WAITING {INITIAL_WAIT_SECONDS} SECONDS FOR SERVERS TO START")
-log_info(f"   (This gives time for Cloudflare Tunnel DNS to propagate)")
 log_separator()
 
 remaining = INITIAL_WAIT_SECONDS
@@ -706,18 +698,16 @@ log_info("✅ Wait completed. Servers should be ready now.")
 
 
 # ============================================================
-# STEP 3: READ logs/ DIRECTORY FOR ENDPOINT CONFIGS
+# STEP 3: READ logs/ DIRECTORY
 # ============================================================
 
 log_separator()
 log_info(f"📖 STEP 3: READING ENDPOINT CONFIGS FROM {LOGS_DIR}/")
 log_separator()
 
-# 🔥 Run IDهای معتبر برای این اجرا
 current_run_ids = list(batch_run_ids.values())
 log_info(f"📌 Valid Run IDs for this execution: {current_run_ids}")
 
-# 🔥 تلاش چند باره برای پیدا کردن همه configها
 endpoint_configs = []
 for attempt in range(1, LOG_RETRY_COUNT + 1):
     log_info(f"📖 Attempt {attempt}/{LOG_RETRY_COUNT}: Reading configs...")
@@ -735,10 +725,14 @@ if not endpoint_configs:
     log_warning("⚠️ No endpoint configs found for current Run IDs.")
 else:
     log_info(f"✅ Found {len(endpoint_configs)} endpoint configs")
+    # 🔥 نمایش mapping
+    log_info("📋 Config mapping (batch_id_in_file → file_name):")
+    for config in endpoint_configs:
+        log_info(f"   batch-{config['batch_id_in_file']} → {config['file_name']}")
 
 
 # ============================================================
-# 🔥 STEP 3.5: CHECK IF ENDPOINTS ARE ALIVE
+# STEP 3.5: CHECK IF ENDPOINTS ARE ALIVE
 # ============================================================
 
 log_separator()
@@ -766,49 +760,53 @@ for config in endpoint_configs:
 endpoint_configs = alive_configs
 
 if not endpoint_configs:
-    log_error("❌ No alive endpoints found! All servers may have shut down already.")
+    log_error("❌ No alive endpoints found!")
 else:
     log_info(f"✅ {len(endpoint_configs)} alive endpoints ready")
 
 
 # ============================================================
-# STEP 4: MATCH BATCHES WITH CONFIGS
+# STEP 4: MATCH BATCHES WITH CONFIGS (BY batch_id_in_file)
 # ============================================================
 
 log_separator()
 log_info("🔗 STEP 4: MATCHING BATCHES WITH ENDPOINT CONFIGS")
+log_info("   (matching by batch_id_in_file, NOT by list index)")
 log_separator()
 
 log_info(f"Address batches: {total_address_batches}")
 log_info(f"Endpoint configs: {len(endpoint_configs)}")
 
-processable_count = min(total_address_batches, len(endpoint_configs))
+# 🔥 ساخت لیست batch_config_pairs با matching بر اساس batch_id
+batch_config_pairs = []
+for idx in range(1, total_address_batches + 1):
+    config = get_config_for_batch_id(endpoint_configs, idx)
+    if config:
+        batch_config_pairs.append((idx, config))
+        log_info(f"✅ Batch {idx} matched with config from {config['file_name']} (batch_id_in_file={config['batch_id_in_file']})")
+    else:
+        log_warning(f"⚠️ No config found for Batch {idx}")
 
-if processable_count == 0:
-    log_error("❌ No processable batches (no alive configs available)")
-    log_info("🛑 Shutting down all triggered servers...")
+if not batch_config_pairs:
+    log_error("❌ No processable batches (no matching configs)")
     for idx, run_id in batch_run_ids.items():
         cancel_workflow(run_id)
-    fail("No alive endpoint configs available for processing")
+    fail("No matching configs available for processing")
 
-if len(endpoint_configs) < total_address_batches:
-    log_warning(f"⚠️ Only {len(endpoint_configs)} configs for {total_address_batches} batches.")
-    log_warning(f"⚠️ Processing first {processable_count} batches only.")
-
-log_info(f"✅ Will process {processable_count} batches")
+log_info(f"✅ Will process {len(batch_config_pairs)} batches")
 
 
 # ============================================================
-# STEP 5: PROCESS BATCHES
+# STEP 5: PROCESS BATCHES SEQUENTIALLY
 # ============================================================
 
 log_separator()
-log_info(f"🚀 STEP 5: PROCESSING {processable_count} BATCHES")
+log_info(f"🚀 STEP 5: PROCESSING {len(batch_config_pairs)} BATCHES SEQUENTIALLY")
 log_separator()
 log_info(f"Send & Run Enabled: {ENABLE_SEND_AND_RUN}")
 
 
-def process_single_batch(batch_index, batch, config, config_index, run_id):
+def process_single_batch(batch_index, batch, config, run_id):
     batch_result = {
         "batch": batch_index,
         "run_id": run_id,
@@ -821,14 +819,14 @@ def process_single_batch(batch_index, batch, config, config_index, run_id):
     }
     
     try:
-        log_info(f"[BATCH {batch_index}] 🚀 Starting... (config #{config_index + 1} from {config['file_name']})")
+        log_info(f"[BATCH {batch_index}] 🚀 Starting... (config from {config['file_name']})")
         
         for pos, item in enumerate(batch, start=1):
             log_info(f"[BATCH {batch_index}]   TARGET{pos}: index={item['index']}, address={item['address'][:30]}...")
         
         token_masked = f"{config['token'][:10]}...{config['token'][-5:]}" if len(config['token']) > 15 else config['token']
-        log_info(f"[BATCH {batch_index}] 🔑 Token {config_index + 1}: {token_masked}")
-        log_info(f"[BATCH {batch_index}] 🌐 Endpoint {config_index + 1}: {config['endpoint']}")
+        log_info(f"[BATCH {batch_index}] 🔑 Token: {token_masked}")
+        log_info(f"[BATCH {batch_index}] 🌐 Endpoint: {config['endpoint']}")
         log_info(f"[BATCH {batch_index}] 📁 Config file: {LOGS_DIR}/{config['file_name']}")
         
         script_file = BASE_DIR / f"script_{batch_index}.sh"
@@ -856,6 +854,7 @@ def process_single_batch(batch_index, batch, config, config_index, run_id):
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
+            # 🔥 STEP A: ارسال اسکریپت به سرور
             payload1 = {"command": f"echo '{b64_data}' > /tmp/script_{batch_index}.b64"}
             
             try:
@@ -865,40 +864,100 @@ def process_single_batch(batch_index, batch, config, config_index, run_id):
                     json=payload1,
                     timeout=60
                 )
-                log_info(f"[BATCH {batch_index}] STEP 1: HTTP {response1.status_code}")
+                log_info(f"[BATCH {batch_index}] STEP 1 (Upload script): HTTP {response1.status_code}")
             except Exception as e:
                 log_error(f"[BATCH {batch_index}] STEP 1 failed: {e}")
                 batch_result["error"] = "Step 1 failed"
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            payload2 = {"command": f"base64 -d /tmp/script_{batch_index}.b64 | bash"}
+            # 🔥 STEP B: اجرای اسکریپت در پس‌زمینه (سریع برمی‌گردد، از Cloudflare timeout جلوگیری می‌کند)
+            payload2 = {
+                "command": (
+                    f"nohup bash -c 'base64 -d /tmp/script_{batch_index}.b64 | bash > "
+                    f"/tmp/result_{batch_index}.txt 2>&1; echo DONE > /tmp/done_{batch_index}.flag' "
+                    f"> /dev/null 2>&1 & echo 'STARTED'"
+                )
+            }
             
             try:
-                start_time = time.time()
                 response2 = requests.post(
                     endpoint,
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                     json=payload2,
-                    timeout=600
+                    timeout=30
                 )
-                elapsed = time.time() - start_time
-                log_info(f"[BATCH {batch_index}] STEP 2: HTTP {response2.status_code} ({elapsed:.1f}s)")
-                
-                if response2.status_code == 200:
-                    is_success, status = check_if_script_successful(response2.text)
-                    script_successful = is_success
-                    script_status = status
-                    log_info(f"[BATCH {batch_index}] Script status: {status}")
-                else:
-                    log_error(f"[BATCH {batch_index}] Script execution failed: HTTP {response2.status_code}")
-                    script_status = f"http_{response2.status_code}"
-            except requests.Timeout:
-                log_error(f"[BATCH {batch_index}] ⏱️ STEP 2 TIMEOUT!")
-                script_status = "timeout"
+                log_info(f"[BATCH {batch_index}] STEP 2 (Start bg script): HTTP {response2.status_code}")
             except Exception as e:
                 log_error(f"[BATCH {batch_index}] STEP 2 failed: {e}")
-                script_status = "request_failed"
+                batch_result["error"] = "Step 2 failed"
+                save_to_blacklist(batch_result["addresses"])
+                return batch_result
+            
+            # 🔥 STEP C: صبر کن تا اسکریپت تمام شود (چک کردن فایل DONE)
+            log_info(f"[BATCH {batch_index}] ⏳ Waiting up to {SCRIPT_EXECUTION_WAIT}s for script to complete...")
+            
+            start_wait = time.time()
+            completed = False
+            
+            while time.time() - start_wait < SCRIPT_EXECUTION_WAIT:
+                elapsed = int(time.time() - start_wait)
+                check_payload = {"command": f"ls /tmp/done_{batch_index}.flag 2>/dev/null && echo EXISTS || echo NOT_YET"}
+                
+                try:
+                    check_resp = requests.post(
+                        endpoint,
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json=check_payload,
+                        timeout=20
+                    )
+                    if "EXISTS" in check_resp.text:
+                        log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s")
+                        completed = True
+                        break
+                except Exception as e:
+                    log_debug(f"[BATCH {batch_index}] Check attempt at {elapsed}s failed: {e}")
+                
+                log_info(f"[BATCH {batch_index}] ⏳ Still running... ({elapsed}s / {SCRIPT_EXECUTION_WAIT}s)")
+                time.sleep(RESULT_CHECK_DELAY)
+            
+            if not completed:
+                log_warning(f"[BATCH {batch_index}] ⚠️ Script did NOT complete within {SCRIPT_EXECUTION_WAIT}s")
+            
+            # 🔥 STEP D: نتیجه را بخوان
+            log_info(f"[BATCH {batch_index}] 📖 Reading result...")
+            payload3 = {"command": f"cat /tmp/result_{batch_index}.txt 2>/dev/null || echo NO_RESULT"}
+            
+            result_text = ""
+            for attempt in range(1, RESULT_CHECK_RETRIES + 1):
+                try:
+                    response3 = requests.post(
+                        endpoint,
+                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json=payload3,
+                        timeout=30
+                    )
+                    if response3.status_code == 200:
+                        result_text = response3.text
+                        log_info(f"[BATCH {batch_index}] ✅ Result received (attempt {attempt})")
+                        break
+                    else:
+                        log_warning(f"[BATCH {batch_index}] Result read attempt {attempt}: HTTP {response3.status_code}")
+                except Exception as e:
+                    log_warning(f"[BATCH {batch_index}] Result read attempt {attempt} failed: {e}")
+                
+                if attempt < RESULT_CHECK_RETRIES:
+                    time.sleep(RESULT_CHECK_DELAY)
+            
+            # 🔥 STEP E: بررسی نتیجه
+            if result_text and "NO_RESULT" not in result_text:
+                is_success, status = check_if_script_successful(result_text)
+                script_successful = is_success
+                script_status = status
+                log_info(f"[BATCH {batch_index}] Script status: {status}")
+            else:
+                log_error(f"[BATCH {batch_index}] Could not read result")
+                script_status = "result_unreadable"
         else:
             log_info(f"[BATCH {batch_index}] 📝 SEND/RUN DISABLED (REPORT ONLY)")
             script_successful = False
@@ -928,23 +987,20 @@ def process_single_batch(batch_index, batch, config, config_index, run_id):
     return batch_result
 
 
-# اجرا
+# 🔥 اجرای متوالی
 batch_results = []
 
-with ThreadPoolExecutor(max_workers=min(processable_count, 10)) as executor:
-    futures = []
-    for idx in range(1, processable_count + 1):
-        batch = address_batches[idx - 1]
-        config = endpoint_configs[idx - 1]
-        run_id = batch_run_ids.get(idx)
-        futures.append(executor.submit(process_single_batch, idx, batch, config, idx - 1, run_id))
+for pair_idx, (batch_id, config) in enumerate(batch_config_pairs):
+    batch = address_batches[batch_id - 1]
+    run_id = batch_run_ids.get(batch_id)
     
-    for future in as_completed(futures):
-        try:
-            result = future.result()
-            batch_results.append(result)
-        except Exception as e:
-            log_error(f"Error processing batch: {e}")
+    result = process_single_batch(batch_id, batch, config, run_id)
+    batch_results.append(result)
+    
+    # فاصله بین بچ‌ها
+    if pair_idx < len(batch_config_pairs) - 1:
+        log_info(f"⏳ Waiting 10s before next batch...")
+        time.sleep(10)
 
 
 # ============================================================
