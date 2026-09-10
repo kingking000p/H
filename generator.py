@@ -148,7 +148,6 @@ def save_to_blacklist(addresses):
 
 
 def parse_response_stdout(response_text):
-    """استخراج stdout از پاسخ JSON"""
     try:
         resp_json = json.loads(response_text)
         stdout = resp_json.get("stdout", "")
@@ -220,7 +219,6 @@ def send_command_to_server(endpoint, token, command, timeout=30):
 
 
 def upload_script_to_server(endpoint, token, batch_index, b64_data):
-    """آپلود اسکریپت در چند chunk"""
     script_path = f"/tmp/script_{batch_index}.b64"
     
     resp = send_command_to_server(endpoint, token, f"rm -f {script_path}", timeout=QUICK_CMD_TIMEOUT)
@@ -260,19 +258,19 @@ def upload_script_to_server(endpoint, token, batch_index, b64_data):
 
 
 # ============================================================
-# 🔥 NEW: تشخیص دقیق وضعیت اسکریپت
+# 🔥 NEW: تشخیص دقیق وضعیت اسکریپت با پشتیبانی از Mixed
 # ============================================================
 
 def check_if_script_successful(response_text):
     """
     🔥 تشخیص دقیق وضعیت اسکریپت با تفکیک حالت‌ها
     
-    خروجی‌ها:
-    - ("success", "success"): موفق واقعی (claim + receive)
-    - ("already_claimed", "already_claimed"): قبلاً claim شده (XNO منتظر receive)
-    - (False, "faucet_budget"): بودجه فاست تموم شده (موقت)
+    Returns:
+    - (True, "success"): موفق کامل - همه آدرس‌ها claim یا already-claimed شدن
+    - (True, "already_claimed"): همه آدرس‌ها قبلاً claim شده بودن
+    - (False, "partial"): بعضی موفق، بعضی ناموفق (به خاطر faucet_budget)
+    - (False, "faucet_budget"): همه ناموفق به خاطر بودجه فاست
     - (False, "ip_limit"): محدودیت IP
-    - (False, "partial"): بعضی موفق، بعضی ناموفق
     - (False, "unknown"): نامشخص
     """
     if not response_text:
@@ -280,46 +278,52 @@ def check_if_script_successful(response_text):
     
     response_lower = response_text.lower()
     
-    # ۱. بررسی بودجه فاست (مشکل موقت)
-    if "faucet hourly budget used up" in response_lower:
-        return False, "faucet_budget"
+    # شمارش سیگنال‌های مختلف
+    has_claim_success = ">>> claim success <<<" in response_lower
+    has_successful_claim = ">>> successful claim" in response_lower
+    has_receive_success = ">>> receive success <<<" in response_lower
+    has_already_claimed = ">>> already claimed <<<" in response_lower
+    has_faucet_budget = (
+        "faucet hourly budget used up" in response_lower or
+        "try again shortly" in response_lower
+    )
+    has_claim_failed = ">>> claim failed <<<" in response_lower
+    has_no_successful_claims = "no successful claims" in response_lower
     
-    if "try again shortly" in response_lower:
-        return False, "faucet_budget"
+    # شمارش آدرس‌های پردازش‌شده
+    total_processed = len(re.findall(r"processing nano_", response_lower))
     
-    # ۲. بررسی محدودیت IP
-    if "claims per ip" in response_lower or "ip limit" in response_lower:
-        return False, "ip_limit"
+    # شمارش موفقیت‌ها
+    success_count = len(re.findall(r">>> successful claim", response_lower))
+    already_count = len(re.findall(r">>> already claimed", response_lower))
+    total_ok = success_count + already_count
     
-    # ۳. بررسی "قبلاً claim شده" (آدرس معتبره ولی دیگه نمیشه claim کرد)
-    already_claimed_indicators = [
-        "already claimed",
-        "one claim per address",
-        "address already claimed",
-    ]
-    for indicator in already_claimed_indicators:
-        if indicator in response_lower:
-            # اگه حداقل یه "already claimed" هست، آدرس‌ها معتبر هستن
-            return True, "already_claimed"
+    log_debug(f"Signal analysis: processed={total_processed}, success={success_count}, already={already_count}, faucet_budget={has_faucet_budget}")
     
-    # ۴. بررسی موفقیت واقعی
-    success_indicators = [
-        "claim successful",
-        "receive successful",
-        "block hash",
-        "balance:",
-    ]
-    for indicator in success_indicators:
-        if indicator in response_lower:
-            return True, "success"
+    # === تصمیم‌گیری ===
     
-    # ۵. بررسی "done" در آخر اسکریپت
-    if "done" in response_lower and "no successful claims" not in response_lower:
+    # ۱. اگه موفقیت یا already وجود داره و هیچ faucet_budget نیست → کامل موفق
+    if total_ok > 0 and not has_faucet_budget:
         return True, "success"
     
-    # ۶. اگه فقط "no successful claims" بود، یعنی همه ناموفق
-    if "no successful claims" in response_lower:
-        # ولی اگه "already claimed" هم داشته، یعنی آدرس‌ها قبلاً استفاده شدن
+    # ۲. اگه هم موفق/already داریم و هم faucet_budget → partial (retry)
+    if total_ok > 0 and has_faucet_budget:
+        return False, "partial"
+    
+    # ۳. اگه فقط faucet_budget (بدون موفقیت) → faucet_budget
+    if has_faucet_budget and total_ok == 0:
+        return False, "faucet_budget"
+    
+    # ۴. اگه فقط already_claimed (بدون موفقیت و بدون faucet)
+    if has_already_claimed and not has_faucet_budget:
+        return True, "already_claimed"
+    
+    # ۵. اگه فقط موفقیت (بدون faucet)
+    if (has_claim_success or has_successful_claim) and not has_faucet_budget:
+        return True, "success"
+    
+    # ۶. اگه هیچی نیس
+    if has_no_successful_claims:
         return False, "unknown"
     
     return False, "unknown"
@@ -1109,29 +1113,39 @@ def process_single_batch(batch_index, batch, config, run_id):
         
         # === STEP G: 🔥 مدیریت آدرس‌ها بر اساس وضعیت ===
         
-        if script_successful:
-            # حالت‌های موفق (success یا already_claimed) → آدرس‌ها رو حذف کن
+        if script_status == "success":
+            # موفق کامل → حذف از GitHub
             log_separator()
-            log_info(f"[BATCH {batch_index}] ✅ Script succeeded (status: {script_status})! Deleting addresses from GitHub...")
+            log_info(f"[BATCH {batch_index}] ✅ COMPLETE SUCCESS! Deleting all addresses from GitHub...")
             log_separator()
             used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
             delete_used_addresses_from_github(used_addresses)
         
-        elif script_status == "faucet_budget":
-            # 🔥 بودجه فاست تموم شده - آدرس‌ها معتبرن، فقط صبر کن
+        elif script_status == "already_claimed":
+            # همه آدرس‌ها قبلاً claim شده بودن → حذف از GitHub
             log_separator()
-            log_warning(f"[BATCH {batch_index}] ⏳ FAUCET BUDGET EXHAUSTED (temporary)")
-            log_warning(f"[BATCH {batch_index}] ⏳ Addresses are STILL VALID - NOT blacklisted")
-            log_warning(f"[BATCH {batch_index}] ⏳ They will be retried in the next run")
-            log_warning(f"[BATCH {batch_index}] ⏳ Addresses NOT deleted from GitHub")
+            log_info(f"[BATCH {batch_index}] ℹ️ All addresses already claimed. Deleting from GitHub...")
+            log_separator()
+            used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
+            delete_used_addresses_from_github(used_addresses)
+        
+        elif script_status == "partial":
+            # 🔥 موفقیت جزئی → آدرس‌ها دست‌نخورده، دفعه بعد دوباره تلاش
+            log_separator()
+            log_warning(f"[BATCH {batch_index}] ⚠️ PARTIAL SUCCESS (some claimed, some failed)")
+            log_warning(f"[BATCH {batch_index}] ⏳ Addresses kept - will retry in next run")
+            log_warning(f"[BATCH {batch_index}] ⏳ NOT deleted from GitHub")
+            log_warning(f"[BATCH {batch_index}] ⏳ NOT blacklisted")
             log_separator()
             # آدرس‌ها نه blacklist میشن، نه از GitHub حذف میشن
         
-        elif script_status == "ip_limit":
-            # 🔥 محدودیت IP - آدرس‌ها معتبرن
+        elif script_status in ("faucet_budget", "ip_limit"):
+            # 🔥 محدودیت موقت → صبر کن، دفعه بعد
             log_separator()
-            log_warning(f"[BATCH {batch_index}] 🌐 IP LIMIT REACHED (temporary)")
-            log_warning(f"[BATCH {batch_index}] 🌐 Addresses are STILL VALID - NOT blacklisted")
+            log_warning(f"[BATCH {batch_index}] ⏳ TEMPORARY LIMIT (status: {script_status})")
+            log_warning(f"[BATCH {batch_index}] ⏳ Addresses are STILL VALID - NOT blacklisted")
+            log_warning(f"[BATCH {batch_index}] ⏳ They will be retried in the next run")
+            log_warning(f"[BATCH {batch_index}] ⏳ Addresses NOT deleted from GitHub")
             log_separator()
             # آدرس‌ها نه blacklist میشن، نه از GitHub حذف میشن
         
@@ -1233,10 +1247,10 @@ log_separator()
 
 for result in batch_results:
     status = result["status"]
-    if result["successful"]:
+    if status in ("success", "already_claimed"):
         status_icon = "✅"
         success_count += 1
-    elif status in ("faucet_budget", "ip_limit"):
+    elif status in ("faucet_budget", "ip_limit", "partial"):
         status_icon = "⏳"
         retry_count += 1
     elif status == "skipped":
