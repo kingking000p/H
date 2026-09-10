@@ -79,10 +79,11 @@ LOGS_DIR = "logs"
 # TIMING
 # ============================================================
 
-INITIAL_WAIT_SECONDS = 90   # 🔥 افزایش از ۶۰ به ۹۰
+INITIAL_WAIT_SECONDS = 90
 LOG_RETRY_COUNT = 15
 LOG_RETRY_DELAY = 5
-RUN_ID_WAIT_SECONDS = 5     # صبر بین trigger و گرفتن run_id
+RUN_ID_WAIT_SECONDS = 5
+RUN_ID_MAX_RETRIES = 5
 
 
 # ============================================================
@@ -254,11 +255,16 @@ def generate_script_for_batch(batch, batch_index):
 
 
 def trigger_workflow_with_inputs(batch_id):
-    """🔥 روشن کردن سرور با GITHUB_TOKEN و batch_id"""
+    """
+    🔥 روشن کردن سرور با GITHUB_TOKEN و batch_id
+    برمی‌گردونه: (response, run_id)
+    run_id از خود پاسخ API گرفته میشه (workflow_run_id)
+    """
     dispatch_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
     dispatch_payload = {
         "ref": GITHUB_REF,
-        "inputs": {"batch_id": str(batch_id)}
+        "inputs": {"batch_id": str(batch_id)},
+        "return_run_details": True
     }
     
     log_debug(f"[BATCH {batch_id}] POST {dispatch_url}")
@@ -272,15 +278,30 @@ def trigger_workflow_with_inputs(batch_id):
             timeout=30
         )
         log_debug(f"[BATCH {batch_id}] Response: HTTP {response.status_code}")
+        
+        run_id_from_response = None
+        
+        if response.status_code == 200:
+            # 🔥 تلاش برای استخراج workflow_run_id از پاسخ
+            try:
+                resp_json = response.json()
+                run_id_from_response = resp_json.get("workflow_run_id")
+                if run_id_from_response:
+                    log_debug(f"[BATCH {batch_id}] workflow_run_id from response: {run_id_from_response}")
+            except Exception as e:
+                log_debug(f"[BATCH {batch_id}] Could not parse response JSON: {e}")
+        
         if response.status_code not in (200, 204):
             log_error(f"[BATCH {batch_id}] Response body: {response.text[:500]}")
-        return response
+        
+        return response, run_id_from_response
+        
     except requests.RequestException as e:
         log_error(f"[BATCH {batch_id}] Request exception: {e}")
-        return None
+        return None, None
     except Exception as e:
         log_error(f"[BATCH {batch_id}] Unexpected exception: {e}")
-        return None
+        return None, None
 
 
 def get_latest_run_id():
@@ -290,51 +311,38 @@ def get_latest_run_id():
         response = requests.get(
             runs_url,
             headers=github_headers(),
-            params={"branch": GITHUB_REF, "per_page": 5},
+            params={"branch": GITHUB_REF, "per_page": 10},
             timeout=30
         )
         if response.status_code == 200:
             runs = response.json().get("workflow_runs", [])
             if runs:
-                # جدیدترین run رو برگردون (اول لیست)
                 return runs[0].get("id")
     except Exception as e:
         log_error(f"Error getting latest run_id: {e}")
     return None
 
 
-def get_run_id_by_batch_id(batch_id):
+def get_latest_unique_run_id(existing_run_ids):
     """
-    🔥 گرفتن Run ID بر اساس batch_id با جستجو در inputهای run
+    🔥 گرفتن جدیدترین run_id که تکراری نباشه
     """
     runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     try:
         response = requests.get(
             runs_url,
             headers=github_headers(),
-            params={"branch": GITHUB_REF, "per_page": 30},
+            params={"branch": GITHUB_REF, "per_page": 20},
             timeout=30
         )
         if response.status_code == 200:
             runs = response.json().get("workflow_runs", [])
             for run in runs:
-                # چک کردن inputها
                 run_id = run.get("id")
-                # گرفتن جزئیات run برای دیدن inputها
-                detail_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/runs/{run_id}"
-                try:
-                    detail_resp = requests.get(detail_url, headers=github_headers(), timeout=15)
-                    if detail_resp.status_code == 200:
-                        detail = detail_resp.json()
-                        # چک display_title یا name
-                        title = detail.get("display_title", "") or ""
-                        name = detail.get("name", "") or ""
-                        if f"batch-{batch_id}" in title or f"batch-{batch_id}" in name:
-                            return run_id
-                except:
-                    pass
+                if run_id and run_id not in existing_run_ids:
+                    return run_id
     except Exception as e:
-        log_error(f"Error getting run_id for batch {batch_id}: {e}")
+        log_error(f"Error getting unique run_id: {e}")
     return None
 
 
@@ -550,7 +558,7 @@ log_info(f"✅ Total address batches: {total_address_batches} (each with {BATCH_
 
 
 # ============================================================
-# STEP 1: TURN ON ALL SERVERS (SEQUENTIALLY WITH RUN ID TRACKING)
+# STEP 1: TURN ON ALL SERVERS (SEQUENTIALLY WITH UNIQUE RUN ID)
 # ============================================================
 
 log_separator()
@@ -565,33 +573,43 @@ for idx, batch in enumerate(address_batches, start=1):
 
 # 🔥 روشن کردن سرورها یکی‌یکی + گرفتن run_id اختصاصی برای هر کدام
 log_info(f"🔥 Triggering {total_address_batches} workflows ONE BY ONE...")
-log_info(f"   (with {RUN_ID_WAIT_SECONDS}s wait between each for unique Run ID)")
+log_info(f"   (with unique Run ID tracking)")
 
 batch_run_ids = {}
+used_run_ids = set()
 
 for idx in range(1, total_address_batches + 1):
     log_info(f"[BATCH {idx}] 🔥 Triggering workflow...")
     
-    # ثبت زمان قبل از trigger
-    before_time = datetime.datetime.now(datetime.timezone.utc)
-    
-    response = trigger_workflow_with_inputs(idx)
+    response, direct_run_id = trigger_workflow_with_inputs(idx)
     
     if response and response.status_code in (200, 204):
         log_info(f"[BATCH {idx}] ✅ Workflow triggered (HTTP {response.status_code})")
         
-        # صبر کن تا GitHub run جدید رو ثبت کنه
-        log_info(f"[BATCH {idx}] ⏳ Waiting {RUN_ID_WAIT_SECONDS}s for GitHub to register the run...")
-        time.sleep(RUN_ID_WAIT_SECONDS)
-        
-        # 🔥 گرفتن جدیدترین run_id (که باید مخصوص همین بچ باشه)
-        run_id = get_latest_run_id()
-        
-        if run_id:
-            batch_run_ids[idx] = run_id
-            log_info(f"[BATCH {idx}] 📌 Run ID: {run_id}")
+        if direct_run_id:
+            # 🔥 بهترین حالت: run_id مستقیم از پاسخ API گرفته شد
+            batch_run_ids[idx] = direct_run_id
+            used_run_ids.add(direct_run_id)
+            log_info(f"[BATCH {idx}] 📌 Run ID (from response): {direct_run_id}")
         else:
-            log_warning(f"[BATCH {idx}] ⚠️ Could not get Run ID")
+            # 🔥 حالت پشتیبان: صبر کن و جدیدترین run_id یکتا رو بگیر
+            log_info(f"[BATCH {idx}] ⏳ Waiting {RUN_ID_WAIT_SECONDS}s for GitHub to register the run...")
+            time.sleep(RUN_ID_WAIT_SECONDS)
+            
+            run_id = None
+            for attempt in range(1, RUN_ID_MAX_RETRIES + 1):
+                run_id = get_latest_unique_run_id(used_run_ids)
+                if run_id:
+                    break
+                log_warning(f"[BATCH {idx}] ⚠️ Attempt {attempt}/{RUN_ID_MAX_RETRIES}: No unique Run ID yet, waiting...")
+                time.sleep(RUN_ID_WAIT_SECONDS)
+            
+            if run_id:
+                batch_run_ids[idx] = run_id
+                used_run_ids.add(run_id)
+                log_info(f"[BATCH {idx}] 📌 Run ID (latest unique): {run_id}")
+            else:
+                log_error(f"[BATCH {idx}] ❌ Could not get unique Run ID after {RUN_ID_MAX_RETRIES} attempts")
     else:
         status_code = response.status_code if response else "None"
         log_error(f"[BATCH {idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
