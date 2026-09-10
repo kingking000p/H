@@ -79,9 +79,10 @@ LOGS_DIR = "logs"
 # TIMING
 # ============================================================
 
-INITIAL_WAIT_SECONDS = 60
-LOG_RETRY_COUNT = 12
+INITIAL_WAIT_SECONDS = 90   # 🔥 افزایش از ۶۰ به ۹۰
+LOG_RETRY_COUNT = 15
 LOG_RETRY_DELAY = 5
+RUN_ID_WAIT_SECONDS = 5     # صبر بین trigger و گرفتن run_id
 
 
 # ============================================================
@@ -199,7 +200,7 @@ def delete_used_addresses_from_github(addresses_to_remove):
 
 
 # ============================================================
-# WORKFLOW HELPERS (with GITHUB_TOKEN - repo K)
+# WORKFLOW HELPERS
 # ============================================================
 
 def cancel_workflow(run_id):
@@ -282,9 +283,29 @@ def trigger_workflow_with_inputs(batch_id):
         return None
 
 
-def get_run_id_for_batch(batch_id):
+def get_latest_run_id():
+    """جدیدترین Run ID رو برمی‌گردونه"""
+    runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
+    try:
+        response = requests.get(
+            runs_url,
+            headers=github_headers(),
+            params={"branch": GITHUB_REF, "per_page": 5},
+            timeout=30
+        )
+        if response.status_code == 200:
+            runs = response.json().get("workflow_runs", [])
+            if runs:
+                # جدیدترین run رو برگردون (اول لیست)
+                return runs[0].get("id")
+    except Exception as e:
+        log_error(f"Error getting latest run_id: {e}")
+    return None
+
+
+def get_run_id_by_batch_id(batch_id):
     """
-    جدیدترین run که با این batch_id اجرا شده رو برمی‌گردونه
+    🔥 گرفتن Run ID بر اساس batch_id با جستجو در inputهای run
     """
     runs_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{WORKFLOW_FILE}/runs"
     try:
@@ -296,30 +317,29 @@ def get_run_id_for_batch(batch_id):
         )
         if response.status_code == 200:
             runs = response.json().get("workflow_runs", [])
-            # مرتب‌سازی بر اساس زمان (جدیدترین اول)
-            runs_sorted = sorted(
-                runs,
-                key=lambda r: r.get("created_at", ""),
-                reverse=True
-            )
-            # دنبال runی بگرد که توضیحاتش شامل batch_id باشه
-            for run in runs_sorted:
-                display_title = run.get("display_title", "") or ""
-                name = run.get("name", "") or ""
-                # اگه run_name شامل "batch-N" بود
-                if f"batch-{batch_id}" in display_title or f"batch-{batch_id}" in name:
-                    return run.get("id")
-            
-            # اگه پیدا نشد، جدیدترین run رو برگردون
-            if runs_sorted:
-                return runs_sorted[0].get("id")
+            for run in runs:
+                # چک کردن inputها
+                run_id = run.get("id")
+                # گرفتن جزئیات run برای دیدن inputها
+                detail_url = f"{GITHUB_API}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/runs/{run_id}"
+                try:
+                    detail_resp = requests.get(detail_url, headers=github_headers(), timeout=15)
+                    if detail_resp.status_code == 200:
+                        detail = detail_resp.json()
+                        # چک display_title یا name
+                        title = detail.get("display_title", "") or ""
+                        name = detail.get("name", "") or ""
+                        if f"batch-{batch_id}" in title or f"batch-{batch_id}" in name:
+                            return run_id
+                except:
+                    pass
     except Exception as e:
         log_error(f"Error getting run_id for batch {batch_id}: {e}")
     return None
 
 
 # ============================================================
-# READ ENDPOINT CONFIGS FROM .txt FILES IN logs/ DIRECTORY
+# READ ENDPOINT CONFIGS
 # ============================================================
 
 def get_all_txt_files():
@@ -375,7 +395,7 @@ def get_endpoint_configs():
     """اسکن همه فایل‌های .txt در logs/ و استخراج endpoint/token"""
     all_files = get_all_txt_files()
     
-    # مرتب‌سازی: فایل‌های batch-1 اول، بعد batch-2 و ...
+    # مرتب‌سازی بر اساس batch_id در اسم فایل
     def sort_key(f):
         name = f["name"]
         match = re.search(r"batch-(\d+)", name)
@@ -411,10 +431,6 @@ def get_endpoint_configs():
     log_info(f"📊 Total endpoint configs found in {LOGS_DIR}: {len(configs)}")
     return configs
 
-
-# ============================================================
-# DELETE ALL TXT FILES (with GITHUB_TOKEN - repo K)
-# ============================================================
 
 def delete_all_txt_files():
     log_separator()
@@ -534,11 +550,11 @@ log_info(f"✅ Total address batches: {total_address_batches} (each with {BATCH_
 
 
 # ============================================================
-# STEP 1: TURN ON ALL SERVERS (using GITHUB_TOKEN)
+# STEP 1: TURN ON ALL SERVERS (SEQUENTIALLY WITH RUN ID TRACKING)
 # ============================================================
 
 log_separator()
-log_info(f"🔥 STEP 1: TURNING ON {total_address_batches} SERVERS (using GITHUB_TOKEN)")
+log_info(f"🔥 STEP 1: TURNING ON {total_address_batches} SERVERS SEQUENTIALLY")
 log_separator()
 
 # ساخت اسکریپت‌ها
@@ -547,33 +563,60 @@ for idx, batch in enumerate(address_batches, start=1):
     script_file = generate_script_for_batch(batch, idx)
     log_info(f"   ✅ Script {idx}: {script_file.name} ({script_file.stat().st_size} bytes)")
 
-# 🔥 روشن کردن همه سرورها با GITHUB_TOKEN
-log_info(f"🔥 Triggering {total_address_batches} workflows (servers) with GITHUB_TOKEN...")
+# 🔥 روشن کردن سرورها یکی‌یکی + گرفتن run_id اختصاصی برای هر کدام
+log_info(f"🔥 Triggering {total_address_batches} workflows ONE BY ONE...")
+log_info(f"   (with {RUN_ID_WAIT_SECONDS}s wait between each for unique Run ID)")
+
+batch_run_ids = {}
 
 for idx in range(1, total_address_batches + 1):
     log_info(f"[BATCH {idx}] 🔥 Triggering workflow...")
+    
+    # ثبت زمان قبل از trigger
+    before_time = datetime.datetime.now(datetime.timezone.utc)
+    
     response = trigger_workflow_with_inputs(idx)
+    
     if response and response.status_code in (200, 204):
         log_info(f"[BATCH {idx}] ✅ Workflow triggered (HTTP {response.status_code})")
+        
+        # صبر کن تا GitHub run جدید رو ثبت کنه
+        log_info(f"[BATCH {idx}] ⏳ Waiting {RUN_ID_WAIT_SECONDS}s for GitHub to register the run...")
+        time.sleep(RUN_ID_WAIT_SECONDS)
+        
+        # 🔥 گرفتن جدیدترین run_id (که باید مخصوص همین بچ باشه)
+        run_id = get_latest_run_id()
+        
+        if run_id:
+            batch_run_ids[idx] = run_id
+            log_info(f"[BATCH {idx}] 📌 Run ID: {run_id}")
+        else:
+            log_warning(f"[BATCH {idx}] ⚠️ Could not get Run ID")
     else:
         status_code = response.status_code if response else "None"
         log_error(f"[BATCH {idx}] ❌ Failed to trigger workflow (HTTP {status_code})")
-    time.sleep(2)  # فاصله بین درخواست‌ها
+    
+    # فاصله بین triggerها
+    if idx < total_address_batches:
+        log_info(f"[BATCH {idx}] ⏳ Waiting 3s before next batch...")
+        time.sleep(3)
 
-# صبر ۳ ثانیه تا GitHub Run IDها ثبت بشن
-log_info("⏳ Waiting 3 seconds for GitHub to register runs...")
-time.sleep(3)
+# نمایش خلاصه run_idها
+log_separator()
+log_info("📌 RUN ID SUMMARY:")
+for idx in sorted(batch_run_ids.keys()):
+    log_info(f"   Batch {idx}: Run ID = {batch_run_ids[idx]}")
 
-# گرفتن Run ID هر بچ
-log_info("📌 Getting Run IDs for all batches...")
-batch_run_ids = {}
-for idx in range(1, total_address_batches + 1):
-    run_id = get_run_id_for_batch(idx)
-    if run_id:
-        batch_run_ids[idx] = run_id
-        log_info(f"[BATCH {idx}] Run ID: {run_id}")
-    else:
-        log_warning(f"[BATCH {idx}] ⚠️ Could not get Run ID")
+# چک تکراری بودن
+all_run_ids = list(batch_run_ids.values())
+if len(all_run_ids) != len(set(all_run_ids)):
+    log_warning("⚠️ Duplicate Run IDs detected!")
+    for run_id in set(all_run_ids):
+        count = all_run_ids.count(run_id)
+        if count > 1:
+            log_warning(f"   Run ID {run_id} appears {count} times")
+else:
+    log_info("✅ All Run IDs are unique!")
 
 log_separator()
 log_info(f"✅ {len(batch_run_ids)}/{total_address_batches} servers triggered successfully")
@@ -581,7 +624,7 @@ log_separator()
 
 
 # ============================================================
-# STEP 2: WAIT 60 SECONDS FOR SERVERS TO START
+# STEP 2: WAIT FOR SERVERS TO START
 # ============================================================
 
 log_separator()
@@ -595,7 +638,7 @@ while remaining > 0:
     time.sleep(sleep_for)
     remaining -= sleep_for
 
-log_info("✅ 60 seconds completed. Servers should be ready now.")
+log_info("✅ Wait completed. Servers should be ready now.")
 
 
 # ============================================================
@@ -606,7 +649,19 @@ log_separator()
 log_info(f"📖 STEP 3: READING ENDPOINT CONFIGS FROM {LOGS_DIR}/")
 log_separator()
 
-endpoint_configs = get_endpoint_configs()
+# 🔥 تلاش چند باره برای پیدا کردن همه configها
+endpoint_configs = []
+for attempt in range(1, LOG_RETRY_COUNT + 1):
+    log_info(f"📖 Attempt {attempt}/{LOG_RETRY_COUNT}: Reading configs...")
+    endpoint_configs = get_endpoint_configs()
+    
+    if len(endpoint_configs) >= total_address_batches:
+        log_info(f"✅ Found enough configs: {len(endpoint_configs)}")
+        break
+    
+    if attempt < LOG_RETRY_COUNT:
+        log_warning(f"⚠️ Only {len(endpoint_configs)}/{total_address_batches} configs found. Retrying in {LOG_RETRY_DELAY}s...")
+        time.sleep(LOG_RETRY_DELAY)
 
 if not endpoint_configs:
     log_warning("⚠️ No endpoint configs found in logs/ directory.")
@@ -642,7 +697,7 @@ log_info(f"✅ Will process {processable_count} batches")
 
 
 # ============================================================
-# STEP 5: PROCESS BATCHES WITH THEIR CONFIGS
+# STEP 5: PROCESS BATCHES
 # ============================================================
 
 log_separator()
@@ -744,17 +799,14 @@ def process_single_batch(batch_index, batch, config, config_index, run_id):
                 script_status = "request_failed"
         else:
             log_info(f"[BATCH {batch_index}] 📝 SEND/RUN DISABLED (REPORT ONLY)")
-            log_info(f"[BATCH {batch_index}]    Would have sent: {script_file.name}")
-            log_info(f"[BATCH {batch_index}]    Would have used endpoint: {endpoint}")
             script_successful = False
             script_status = "skipped"
         
         batch_result["successful"] = script_successful
         batch_result["status"] = script_status
         
-        # پاک کردن آدرس‌ها با GG_TOKEN
         if script_successful:
-            log_info(f"[BATCH {batch_index}] ✅ Deleting addresses from GitHub (with GG_TOKEN)...")
+            log_info(f"[BATCH {batch_index}] ✅ Deleting addresses from GitHub...")
             used_addresses = [batch[0]["address"], batch[1]["address"], batch[2]["address"]]
             delete_used_addresses_from_github(used_addresses)
         else:
@@ -798,7 +850,7 @@ with ThreadPoolExecutor(max_workers=min(processable_count, 10)) as executor:
 # ============================================================
 
 log_separator()
-log_info("🛑 STEP 6: SHUTTING DOWN ALL SERVERS (using GITHUB_TOKEN)")
+log_info("🛑 STEP 6: SHUTTING DOWN ALL SERVERS")
 log_separator()
 
 for idx in range(1, total_address_batches + 1):
@@ -834,6 +886,10 @@ log_info(f"   Servers triggered: {len(batch_run_ids)}")
 log_info(f"   Endpoint configs found: {len(endpoint_configs)}")
 log_info(f"   Batches processed: {len(batch_results)}")
 log_info(f"   Send & Run Enabled: {ENABLE_SEND_AND_RUN}")
+
+log_info("📌 Run IDs used:")
+for idx in sorted(batch_run_ids.keys()):
+    log_info(f"   Batch {idx}: {batch_run_ids[idx]}")
 
 final_blacklist = load_blacklist()
 log_info(f"📋 Final blacklist: {len(final_blacklist)} addresses")
