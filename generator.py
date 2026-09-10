@@ -91,10 +91,11 @@ SCRIPT_EXECUTION_WAIT = 180
 RESULT_CHECK_RETRIES = 10
 RESULT_CHECK_DELAY = 10
 
-# 🔥 timeout کوتاه برای دستورات ساده
 QUICK_CMD_TIMEOUT = 15
-# 🔥 timeout برای شروع اسکریپت (setsid سریع برمی‌گرده)
 START_SCRIPT_TIMEOUT = 20
+
+# 🔥 اندازه chunk برای آپلود base64
+CHUNK_SIZE = 1000
 
 
 # ============================================================
@@ -147,6 +148,31 @@ def save_to_blacklist(addresses):
     log_warning(f"⚠️ Added {len(new_addresses)} addresses to blacklist")
 
 
+def parse_response_stdout(response_text):
+    """
+    🔥 استخراج stdout از پاسخ JSON
+    """
+    try:
+        resp_json = json.loads(response_text)
+        stdout = resp_json.get("stdout", "")
+        lines = stdout.splitlines()
+        cleaned = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # رد کردن خطوطی که خود دستور هستن
+            if line.startswith("if [") or line.startswith("echo ") or line.startswith("cat "):
+                continue
+            if line.startswith("ls ") or line.startswith("wc ") or line.startswith("test "):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
+    except Exception as e:
+        log_debug(f"Could not parse response: {e}")
+        return response_text
+
+
 def check_endpoint_alive(endpoint, token):
     base_url = endpoint.replace("/command", "")
     try:
@@ -196,6 +222,52 @@ def send_command_to_server(endpoint, token, command, timeout=30):
     except Exception as e:
         log_error(f"send_command_to_server failed: {e}")
         return None
+
+
+def upload_script_to_server(endpoint, token, batch_index, b64_data):
+    """
+    🔥 آپلود اسکریپت در چند chunk برای جلوگیری از محدودیت PTY
+    """
+    script_path = f"/tmp/script_{batch_index}.b64"
+    
+    # پاک کردن فایل قبلی
+    resp = send_command_to_server(endpoint, token, f"rm -f {script_path}", timeout=QUICK_CMD_TIMEOUT)
+    if not resp or resp.status_code != 200:
+        log_error(f"Could not clear {script_path}")
+        return False
+    
+    # تقسیم به chunks
+    chunks = [b64_data[i:i+CHUNK_SIZE] for i in range(0, len(b64_data), CHUNK_SIZE)]
+    log_info(f"[BATCH {batch_index}] 📤 Uploading {len(b64_data)} chars in {len(chunks)} chunks...")
+    
+    for i, chunk in enumerate(chunks, start=1):
+        # هر chunk رو با printf بنویس (بدون newline)
+        cmd = f"printf '%s' '{chunk}' >> {script_path}"
+        resp = send_command_to_server(endpoint, token, cmd, timeout=QUICK_CMD_TIMEOUT)
+        
+        if not resp or resp.status_code != 200:
+            log_error(f"[BATCH {batch_index}] Chunk {i}/{len(chunks)} failed")
+            return False
+        
+        if i % 5 == 0 or i == len(chunks):
+            log_info(f"[BATCH {batch_index}] 📤 Chunk {i}/{len(chunks)} uploaded")
+    
+    # تأیید اندازه فایل
+    check_cmd = f"wc -c < {script_path}"
+    check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=QUICK_CMD_TIMEOUT)
+    
+    if check_resp and check_resp.status_code == 200:
+        stdout = parse_response_stdout(check_resp.text)
+        nums = re.findall(r'\d+', stdout)
+        if nums:
+            actual_size = int(nums[-1])
+            expected_size = len(b64_data)
+            log_info(f"[BATCH {batch_index}] 📁 File size: {actual_size} (expected: {expected_size})")
+            if actual_size != expected_size:
+                log_warning(f"[BATCH {batch_index}] ⚠️ Size mismatch!")
+                return False
+    
+    return True
 
 
 # ============================================================
@@ -817,9 +889,6 @@ log_info(f"Send & Run Enabled: {ENABLE_SEND_AND_RUN}")
 
 
 def process_single_batch(batch_index, batch, config, run_id):
-    """
-    🔥 پردازش یک batch با endpoint/token مخصوص خودش
-    """
     batch_result = {
         "batch": batch_index,
         "run_id": run_id,
@@ -872,48 +941,36 @@ def process_single_batch(batch_index, batch, config, run_id):
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            # === STEP A: ارسال اسکریپت ===
-            log_info(f"[BATCH {batch_index}] 📤 STEP A: Uploading script...")
-            upload_cmd = f"cat > /tmp/script_{batch_index}.b64 << 'B64EOF'\n{b64_data}\nB64EOF\necho 'UPLOADED'"
+            # === STEP A: آپلود اسکریپت در chunks ===
+            log_info(f"[BATCH {batch_index}] 📤 STEP A: Uploading script in chunks...")
             
-            response1 = send_command_to_server(endpoint, token, upload_cmd, timeout=60)
+            upload_ok = upload_script_to_server(endpoint, token, batch_index, b64_data)
             
-            if not response1 or response1.status_code != 200:
-                status = response1.status_code if response1 else "None"
-                log_error(f"[BATCH {batch_index}] STEP A failed: HTTP {status}")
-                batch_result["error"] = "Step A failed"
+            if not upload_ok:
+                log_error(f"[BATCH {batch_index}] ❌ STEP A failed")
+                batch_result["error"] = "Upload failed"
                 save_to_blacklist(batch_result["addresses"])
                 return batch_result
             
-            log_info(f"[BATCH {batch_index}] ✅ STEP A: HTTP {response1.status_code}")
+            log_info(f"[BATCH {batch_index}] ✅ STEP A: Upload OK")
             
-            # تأیید آپلود
-            check_upload = send_command_to_server(endpoint, token, f"ls -la /tmp/script_{batch_index}.b64", timeout=QUICK_CMD_TIMEOUT)
-            if check_upload and check_upload.status_code == 200:
-                log_info(f"[BATCH {batch_index}] 📁 Upload check: {check_upload.text[:200]}")
-            
-            # === STEP B: اجرای اسکریپت با setsid (کاملاً جدا از PTY) ===
+            # === STEP B: دیکد و شروع اسکریپت با setsid ===
             log_info(f"[BATCH {batch_index}] 🚀 STEP B: Starting script with setsid...")
             
             # پاک کردن فایل‌های قبلی
-            cleanup_cmd = f"rm -f /tmp/result_{batch_index}.txt /tmp/done_{batch_index}.flag /tmp/exit_code_{batch_index}.txt"
+            cleanup_cmd = f"rm -f /tmp/result_{batch_index}.txt /tmp/done_{batch_index}.flag /tmp/exit_code_{batch_index}.txt /tmp/b64error_{batch_index}.txt"
             send_command_to_server(endpoint, token, cleanup_cmd, timeout=QUICK_CMD_TIMEOUT)
             
-            # 🔥 دستور setsid - کاملاً از PTY جدا می‌شه
+            # دستور setsid
             bg_command = (
-                f"cd /tmp && "
-                f"base64 -d /tmp/script_{batch_index}.b64 > /tmp/script_{batch_index}.sh && "
+                f"base64 -d /tmp/script_{batch_index}.b64 > /tmp/script_{batch_index}.sh 2>/tmp/b64error_{batch_index}.txt && "
                 f"chmod +x /tmp/script_{batch_index}.sh && "
-                f"setsid bash -c '"
-                f"bash /tmp/script_{batch_index}.sh > /tmp/result_{batch_index}.txt 2>&1; "
+                f"setsid bash -c 'bash /tmp/script_{batch_index}.sh > /tmp/result_{batch_index}.txt 2>&1; "
                 f"echo $? > /tmp/exit_code_{batch_index}.txt; "
-                f"touch /tmp/done_{batch_index}.flag"
-                f"' < /dev/null > /dev/null 2>&1 & "
+                f"touch /tmp/done_{batch_index}.flag' < /dev/null > /dev/null 2>&1 & "
                 f"disown; "
                 f"echo 'STARTED'"
             )
-            
-            log_debug(f"[BATCH {batch_index}] STEP B command: {bg_command[:200]}...")
             
             response2 = send_command_to_server(endpoint, token, bg_command, timeout=START_SCRIPT_TIMEOUT)
             
@@ -925,37 +982,36 @@ def process_single_batch(batch_index, batch, config, run_id):
                 return batch_result
             
             log_info(f"[BATCH {batch_index}] ✅ STEP B: HTTP {response2.status_code}")
-            log_info(f"[BATCH {batch_index}] 📄 Response: {response2.text[:200]}")
             
             # === STEP C: صبر و بررسی وضعیت ===
             log_info(f"[BATCH {batch_index}] ⏳ STEP C: Waiting for script to complete (max {SCRIPT_EXECUTION_WAIT}s)...")
             
             start_wait = time.time()
             completed = False
+            done_response = ""
             
             while time.time() - start_wait < SCRIPT_EXECUTION_WAIT:
                 elapsed = int(time.time() - start_wait)
                 
-                check_cmd = (
-                    f"if [ -f /tmp/done_{batch_index}.flag ]; then "
-                    f"echo 'DONE'; "
-                    f"cat /tmp/exit_code_{batch_index}.txt 2>/dev/null; "
-                    f"else echo 'NOT_YET'; fi"
-                )
+                check_cmd = f"test -f /tmp/done_{batch_index}.flag && cat /tmp/exit_code_{batch_index}.txt || echo 'NOT_YET'"
                 
                 check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=QUICK_CMD_TIMEOUT)
                 
                 if check_resp and check_resp.status_code == 200:
-                    resp_text = check_resp.text.strip()
+                    # 🔥 فقط stdout رو بررسی کن
+                    stdout = parse_response_stdout(check_resp.text)
                     
-                    if "DONE" in resp_text:
-                        log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s")
-                        log_info(f"[BATCH {batch_index}] 📊 Status: {resp_text[:100]}")
-                        completed = True
-                        break
-                    else:
-                        if elapsed % 30 == 0 and elapsed > 0:
-                            log_info(f"[BATCH {batch_index}] ⏳ Still running... ({elapsed}s / {SCRIPT_EXECUTION_WAIT}s)")
+                    if stdout and "NOT_YET" not in stdout:
+                        cleaned = stdout.strip()
+                        if cleaned.isdigit() or "DONE" in stdout:
+                            log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s")
+                            log_info(f"[BATCH {batch_index}] 📊 Exit code: {cleaned}")
+                            completed = True
+                            done_response = cleaned
+                            break
+                    
+                    if elapsed % 30 == 0 and elapsed > 0:
+                        log_info(f"[BATCH {batch_index}] ⏳ Still running... ({elapsed}s / {SCRIPT_EXECUTION_WAIT}s)")
                 else:
                     log_warning(f"[BATCH {batch_index}] ⚠️ Check failed at {elapsed}s")
                 
@@ -963,6 +1019,8 @@ def process_single_batch(batch_index, batch, config, run_id):
             
             if not completed:
                 log_warning(f"[BATCH {batch_index}] ⚠️ Script did NOT complete within {SCRIPT_EXECUTION_WAIT}s")
+            else:
+                log_info(f"[BATCH {batch_index}] ✅ Script finished with exit code: {done_response}")
             
             # === STEP D: خواندن نتیجه ===
             log_info(f"[BATCH {batch_index}] 📖 STEP D: Reading result...")
@@ -976,7 +1034,7 @@ def process_single_batch(batch_index, batch, config, run_id):
                 )
                 
                 if result_resp and result_resp.status_code == 200:
-                    result_text = result_resp.text
+                    result_text = parse_response_stdout(result_resp.text)
                     log_info(f"[BATCH {batch_index}] ✅ Result received (attempt {attempt}, size: {len(result_text)} chars)")
                     break
                 else:
