@@ -91,6 +91,11 @@ SCRIPT_EXECUTION_WAIT = 180
 RESULT_CHECK_RETRIES = 10
 RESULT_CHECK_DELAY = 10
 
+# 🔥 timeout کوتاه برای دستورات ساده
+QUICK_CMD_TIMEOUT = 15
+# 🔥 timeout برای شروع اسکریپت (setsid سریع برمی‌گرده)
+START_SCRIPT_TIMEOUT = 20
+
 
 # ============================================================
 # HELPERS
@@ -179,7 +184,7 @@ def wait_for_endpoint_alive(endpoint, token, max_retries=None, delay=None):
 
 
 def send_command_to_server(endpoint, token, command, timeout=30):
-    """🔥 ارسال دستور به سرور و برگرداندن پاسخ"""
+    """🔥 ارسال دستور به سرور"""
     try:
         response = requests.post(
             endpoint,
@@ -869,8 +874,9 @@ def process_single_batch(batch_index, batch, config, run_id):
             
             # === STEP A: ارسال اسکریپت ===
             log_info(f"[BATCH {batch_index}] 📤 STEP A: Uploading script...")
-            payload1 = {"command": f"echo '{b64_data}' > /tmp/script_{batch_index}.b64"}
-            response1 = send_command_to_server(endpoint, token, payload1["command"], timeout=60)
+            upload_cmd = f"cat > /tmp/script_{batch_index}.b64 << 'B64EOF'\n{b64_data}\nB64EOF\necho 'UPLOADED'"
+            
+            response1 = send_command_to_server(endpoint, token, upload_cmd, timeout=60)
             
             if not response1 or response1.status_code != 200:
                 status = response1.status_code if response1 else "None"
@@ -882,29 +888,34 @@ def process_single_batch(batch_index, batch, config, run_id):
             log_info(f"[BATCH {batch_index}] ✅ STEP A: HTTP {response1.status_code}")
             
             # تأیید آپلود
-            check_upload = send_command_to_server(endpoint, token, f"ls -la /tmp/script_{batch_index}.b64", timeout=15)
+            check_upload = send_command_to_server(endpoint, token, f"ls -la /tmp/script_{batch_index}.b64", timeout=QUICK_CMD_TIMEOUT)
             if check_upload and check_upload.status_code == 200:
                 log_info(f"[BATCH {batch_index}] 📁 Upload check: {check_upload.text[:200]}")
             
-            # === STEP B: اجرای اسکریپت در پس‌زمینه ===
-            log_info(f"[BATCH {batch_index}] 🚀 STEP B: Starting script in background...")
+            # === STEP B: اجرای اسکریپت با setsid (کاملاً جدا از PTY) ===
+            log_info(f"[BATCH {batch_index}] 🚀 STEP B: Starting script with setsid...")
             
             # پاک کردن فایل‌های قبلی
-            cleanup_cmd = f"rm -f /tmp/result_{batch_index}.txt /tmp/done_{batch_index}.flag /tmp/error_{batch_index}.txt"
-            send_command_to_server(endpoint, token, cleanup_cmd, timeout=15)
+            cleanup_cmd = f"rm -f /tmp/result_{batch_index}.txt /tmp/done_{batch_index}.flag /tmp/exit_code_{batch_index}.txt"
+            send_command_to_server(endpoint, token, cleanup_cmd, timeout=QUICK_CMD_TIMEOUT)
             
-            # دستور اجرا در پس‌زمینه
+            # 🔥 دستور setsid - کاملاً از PTY جدا می‌شه
             bg_command = (
                 f"cd /tmp && "
                 f"base64 -d /tmp/script_{batch_index}.b64 > /tmp/script_{batch_index}.sh && "
                 f"chmod +x /tmp/script_{batch_index}.sh && "
-                f"nohup bash /tmp/script_{batch_index}.sh > /tmp/result_{batch_index}.txt 2>&1 ; "
-                f"echo $? > /tmp/exit_code_{batch_index}.txt ; "
-                f"touch /tmp/done_{batch_index}.flag & "
+                f"setsid bash -c '"
+                f"bash /tmp/script_{batch_index}.sh > /tmp/result_{batch_index}.txt 2>&1; "
+                f"echo $? > /tmp/exit_code_{batch_index}.txt; "
+                f"touch /tmp/done_{batch_index}.flag"
+                f"' < /dev/null > /dev/null 2>&1 & "
+                f"disown; "
                 f"echo 'STARTED'"
             )
             
-            response2 = send_command_to_server(endpoint, token, bg_command, timeout=30)
+            log_debug(f"[BATCH {batch_index}] STEP B command: {bg_command[:200]}...")
+            
+            response2 = send_command_to_server(endpoint, token, bg_command, timeout=START_SCRIPT_TIMEOUT)
             
             if not response2 or response2.status_code != 200:
                 status = response2.status_code if response2 else "None"
@@ -921,7 +932,6 @@ def process_single_batch(batch_index, batch, config, run_id):
             
             start_wait = time.time()
             completed = False
-            last_status = ""
             
             while time.time() - start_wait < SCRIPT_EXECUTION_WAIT:
                 elapsed = int(time.time() - start_wait)
@@ -933,19 +943,14 @@ def process_single_batch(batch_index, batch, config, run_id):
                     f"else echo 'NOT_YET'; fi"
                 )
                 
-                check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=20)
+                check_resp = send_command_to_server(endpoint, token, check_cmd, timeout=QUICK_CMD_TIMEOUT)
                 
                 if check_resp and check_resp.status_code == 200:
                     resp_text = check_resp.text.strip()
                     
                     if "DONE" in resp_text:
-                        exit_code = "unknown"
-                        if "0" in resp_text:
-                            exit_code = "0"
-                        elif "1" in resp_text:
-                            exit_code = "1"
-                        
-                        log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s (exit_code: {exit_code})")
+                        log_info(f"[BATCH {batch_index}] ✅ Script completed after {elapsed}s")
+                        log_info(f"[BATCH {batch_index}] 📊 Status: {resp_text[:100]}")
                         completed = True
                         break
                     else:
@@ -967,7 +972,7 @@ def process_single_batch(batch_index, batch, config, run_id):
                 result_resp = send_command_to_server(
                     endpoint, token,
                     f"cat /tmp/result_{batch_index}.txt 2>/dev/null || echo 'NO_RESULT'",
-                    timeout=30
+                    timeout=QUICK_CMD_TIMEOUT
                 )
                 
                 if result_resp and result_resp.status_code == 200:
@@ -984,7 +989,6 @@ def process_single_batch(batch_index, batch, config, run_id):
             log_separator()
             
             if result_text:
-                # نمایش کل نتیجه (بدون truncate)
                 for line in result_text.splitlines():
                     log_info(f"[BATCH {batch_index}] | {line}")
             else:
