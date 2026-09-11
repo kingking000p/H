@@ -8,6 +8,7 @@ import base64
 import requests
 import datetime
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
@@ -258,7 +259,7 @@ def upload_script_to_server(endpoint, token, batch_index, b64_data):
 
 
 # ============================================================
-# 🔥 NEW: تشخیص دقیق وضعیت اسکریپت با پشتیبانی از Mixed
+# 🔥 تشخیص دقیق وضعیت اسکریپت
 # ============================================================
 
 def check_if_script_successful(response_text):
@@ -266,7 +267,7 @@ def check_if_script_successful(response_text):
     🔥 تشخیص دقیق وضعیت اسکریپت با تفکیک حالت‌ها
     
     Returns:
-    - (True, "success"): موفق کامل - همه آدرس‌ها claim یا already-claimed شدن
+    - (True, "success"): همه آدرس‌ها موفق (claim + receive)
     - (True, "already_claimed"): همه آدرس‌ها قبلاً claim شده بودن
     - (False, "partial"): بعضی موفق، بعضی ناموفق (به خاطر faucet_budget)
     - (False, "faucet_budget"): همه ناموفق به خاطر بودجه فاست
@@ -278,7 +279,6 @@ def check_if_script_successful(response_text):
     
     response_lower = response_text.lower()
     
-    # شمارش سیگنال‌های مختلف
     has_claim_success = ">>> claim success <<<" in response_lower
     has_successful_claim = ">>> successful claim" in response_lower
     has_receive_success = ">>> receive success <<<" in response_lower
@@ -290,27 +290,23 @@ def check_if_script_successful(response_text):
     has_claim_failed = ">>> claim failed <<<" in response_lower
     has_no_successful_claims = "no successful claims" in response_lower
     
-    # شمارش آدرس‌های پردازش‌شده
     total_processed = len(re.findall(r"processing nano_", response_lower))
     
-    # شمارش موفقیت‌ها
     success_count = len(re.findall(r">>> successful claim", response_lower))
     already_count = len(re.findall(r">>> already claimed", response_lower))
     total_ok = success_count + already_count
     
     log_debug(f"Signal analysis: processed={total_processed}, success={success_count}, already={already_count}, faucet_budget={has_faucet_budget}")
     
-    # === تصمیم‌گیری ===
-    
     # ۱. اگه موفقیت یا already وجود داره و هیچ faucet_budget نیست → کامل موفق
     if total_ok > 0 and not has_faucet_budget:
         return True, "success"
     
-    # ۲. اگه هم موفق/already داریم و هم faucet_budget → partial (retry)
+    # ۲. اگه هم موفق/already داریم و هم faucet_budget → partial
     if total_ok > 0 and has_faucet_budget:
         return False, "partial"
     
-    # ۳. اگه فقط faucet_budget (بدون موفقیت) → faucet_budget
+    # ۳. اگه فقط faucet_budget (بدون موفقیت)
     if has_faucet_budget and total_ok == 0:
         return False, "faucet_budget"
     
@@ -330,17 +326,47 @@ def check_if_script_successful(response_text):
 
 
 # ============================================================
+# 🔥 NEW: استخراج آدرس‌های موفق از لاگ
+# ============================================================
+
+def extract_successful_addresses_from_log(response_text):
+    """
+    🔥 استخراج آدرس‌هایی که با موفقیت pocket شدن
+    از روی مارکرهای __SUCCESSFUL_ADDRESS__ که template.sh چاپ می‌کنه
+    """
+    if not response_text:
+        return []
+    
+    matches = re.findall(r"__SUCCESSFUL_ADDRESS__:(nano_[a-z0-9]+)", response_text)
+    unique = list(set(matches))
+    
+    if unique:
+        log_debug(f"Extracted {len(unique)} successful addresses from log")
+    
+    return unique
+
+
+# ============================================================
 # DELETE USED ADDRESSES
 # ============================================================
 
 def delete_used_addresses_from_github(addresses_to_remove):
+    if not addresses_to_remove:
+        log_info("No addresses to delete")
+        return True
+    
     log_separator()
-    log_info("DELETING USED ADDRESSES FROM GITHUB (using GG_TOKEN)")
+    log_info(f"DELETING {len(addresses_to_remove)} ADDRESSES FROM GITHUB (using GG_TOKEN)")
     log_separator()
+    
+    for addr in addresses_to_remove:
+        log_info(f"   - {addr[:40]}...")
+    
     addresses_url = "https://api.github.com/repos/kingking000p/H/contents/addresses.txt"
     if not GG_TOKEN:
         log_error("GG_TOKEN is not set, skipping deletion")
         return False
+    
     headers = gg_headers()
     try:
         response = requests.get(addresses_url, headers=headers)
@@ -353,9 +379,11 @@ def delete_used_addresses_from_github(addresses_to_remove):
     except Exception as e:
         log_error(f"Reading file error: {e}")
         return False
+    
     lines = current_content.splitlines()
     new_lines = []
     removed_count = 0
+    
     for line in lines:
         line = line.strip()
         if not line:
@@ -368,9 +396,11 @@ def delete_used_addresses_from_github(addresses_to_remove):
                 break
         if not should_remove:
             new_lines.append(line)
+    
     if removed_count == 0:
         log_info("No matching addresses found to remove")
         return True
+    
     new_content = "\n".join(new_lines)
     encoded_content = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
     payload = {
@@ -944,6 +974,8 @@ def process_single_batch(batch_index, batch, config, run_id):
         "addresses": [item["address"] for item in batch]
     }
     
+    result_text = ""  # 🔥 برای استفاده در STEP G
+    
     try:
         log_separator()
         log_info(f"[BATCH {batch_index}] 🚀 Starting... (config from {config['file_name']})")
@@ -1065,7 +1097,6 @@ def process_single_batch(batch_index, batch, config, run_id):
             # === STEP D: خواندن نتیجه ===
             log_info(f"[BATCH {batch_index}] 📖 STEP D: Reading result...")
             
-            result_text = ""
             for attempt in range(1, RESULT_CHECK_RETRIES + 1):
                 result_resp = send_command_to_server(
                     endpoint, token,
@@ -1111,10 +1142,12 @@ def process_single_batch(batch_index, batch, config, run_id):
         batch_result["successful"] = script_successful
         batch_result["status"] = script_status
         
-        # === STEP G: 🔥 مدیریت آدرس‌ها بر اساس وضعیت ===
+        # ============================================================
+        # STEP G: 🔥 مدیریت آدرس‌ها بر اساس وضعیت
+        # ============================================================
         
         if script_status == "success":
-            # موفق کامل → حذف از GitHub
+            # موفق کامل → حذف همه آدرس‌ها
             log_separator()
             log_info(f"[BATCH {batch_index}] ✅ COMPLETE SUCCESS! Deleting all addresses from GitHub...")
             log_separator()
@@ -1130,14 +1163,31 @@ def process_single_batch(batch_index, batch, config, run_id):
             delete_used_addresses_from_github(used_addresses)
         
         elif script_status == "partial":
-            # 🔥 موفقیت جزئی → آدرس‌ها دست‌نخورده، دفعه بعد دوباره تلاش
+            # 🔥 موفقیت جزئی → فقط آدرس‌های موفق حذف بشن
             log_separator()
-            log_warning(f"[BATCH {batch_index}] ⚠️ PARTIAL SUCCESS (some claimed, some failed)")
-            log_warning(f"[BATCH {batch_index}] ⏳ Addresses kept - will retry in next run")
-            log_warning(f"[BATCH {batch_index}] ⏳ NOT deleted from GitHub")
-            log_warning(f"[BATCH {batch_index}] ⏳ NOT blacklisted")
+            log_warning(f"[BATCH {batch_index}] ⚠️ PARTIAL SUCCESS detected")
             log_separator()
-            # آدرس‌ها نه blacklist میشن، نه از GitHub حذف میشن
+            
+            successful_addrs = extract_successful_addresses_from_log(result_text)
+            
+            if successful_addrs:
+                log_info(f"[BATCH {batch_index}] ✅ Found {len(successful_addrs)} successful addresses:")
+                for addr in successful_addrs:
+                    log_info(f"   - {addr[:40]}...")
+                
+                log_info(f"[BATCH {batch_index}] 🗑️ Deleting successful addresses from GitHub...")
+                delete_used_addresses_from_github(successful_addrs)
+                
+                failed_addrs = [a for a in batch_result["addresses"] if a not in successful_addrs]
+                if failed_addrs:
+                    log_warning(f"[BATCH {batch_index}] ⏳ {len(failed_addrs)} failed addresses kept for retry:")
+                    for addr in failed_addrs:
+                        log_warning(f"   - {addr[:40]}...")
+            else:
+                log_warning(f"[BATCH {batch_index}] ⚠️ No successful addresses found in log")
+                log_warning(f"[BATCH {batch_index}] ⏳ Keeping all addresses for retry")
+            
+            log_warning(f"[BATCH {batch_index}] ⏳ Failed addresses NOT blacklisted")
         
         elif script_status in ("faucet_budget", "ip_limit"):
             # 🔥 محدودیت موقت → صبر کن، دفعه بعد
@@ -1147,7 +1197,6 @@ def process_single_batch(batch_index, batch, config, run_id):
             log_warning(f"[BATCH {batch_index}] ⏳ They will be retried in the next run")
             log_warning(f"[BATCH {batch_index}] ⏳ Addresses NOT deleted from GitHub")
             log_separator()
-            # آدرس‌ها نه blacklist میشن، نه از GitHub حذف میشن
         
         elif script_status == "skipped":
             log_info(f"[BATCH {batch_index}] ℹ️ Send/Run disabled. Addresses untouched.")
