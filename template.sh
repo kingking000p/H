@@ -6,6 +6,7 @@
 python3 -m pip install -U nanopy feeless402 requests && \
 python3 - <<'PY'
 import os
+import sys
 import time
 import secrets
 import requests
@@ -13,10 +14,10 @@ import nanopy
 
 
 # ============================================================
-# 🔥 CONFIG - فقط این ۷ متغیر رو پر کن
+# CONFIG
 # ============================================================
 
-SEED = '6'
+SEED = '673754a71ff81f5d7dc9c4d1f2e3acd996df945794e4de4c34e0ea4cc2861234'
 ADDRESS1 = '__ADDRESS1__'
 INDEX1  = __INDEX1__
 
@@ -64,17 +65,12 @@ session = requests.Session()
 
 
 # ============================================================
-# 🔥 HASH CLEANER
+# HASH CLEANER
 # ============================================================
 
 def clean_hash(h):
-    """
-    🔥 پاک‌سازی کامل hash از هر کاراکتر غیر-hex
-    """
     if h is None:
         return None
-    
-    # تبدیل bytes به string
     if isinstance(h, bytes):
         try:
             h = h.decode("utf-8", errors="ignore")
@@ -82,10 +78,7 @@ def clean_hash(h):
             h = str(h)
     else:
         h = str(h)
-    
-    # فقط کاراکترهای hex رو نگه دار
     h = "".join(c for c in h if c in "0123456789abcdefABCDEF")
-    
     return h
 
 
@@ -219,7 +212,6 @@ def get_receivable(address):
     amount = info.get("amount")
     if amount is None:
         return None
-    # 🔥 پاک‌سازی hash هنگام دریافت
     clean = clean_hash(source_hash)
     return {"hash": clean, "amount": int(amount)}
 
@@ -257,35 +249,26 @@ def receive(index, address, pending):
     source_hash = pending["hash"]
     amount = pending["amount"]
     
-    # ============================================================
-    # 🔥 FIX: پاک‌سازی نهایی hash
-    # ============================================================
     print(f"source_hash (before): {repr(source_hash)}")
     
-    # تبدیل bytes به string
     if isinstance(source_hash, bytes):
         source_hash = source_hash.decode("utf-8", errors="ignore")
     
-    # فقط کاراکترهای hex
     source_hash = "".join(c for c in str(source_hash) if c in "0123456789abcdefABCDEF")
     
     print(f"source_hash (after):  {repr(source_hash)}")
     print(f"source_hash length:   {len(source_hash)}")
     print(f"amount:               {amount} raw")
     
-    # بررسی طول hash
     if len(source_hash) != 64:
-        raise RuntimeError(f"Invalid hash length: {len(source_hash)} (expected 64). Hash: {repr(source_hash)}")
+        raise RuntimeError(f"Invalid hash length: {len(source_hash)} (expected 64)")
     
-    # تست تبدیل به bytes
     try:
         hash_bytes = bytes.fromhex(source_hash)
         print(f"hash_bytes length: {len(hash_bytes)} bytes")
     except ValueError as e:
-        raise RuntimeError(f"Cannot convert hash to bytes: {e}. Hash: {repr(source_hash)}")
-    # ============================================================
+        raise RuntimeError(f"Cannot convert hash to bytes: {e}")
 
-    # تلاش اول: با string
     rb = None
     try:
         print("Trying acc.receive(hash_=str, ...)...")
@@ -293,8 +276,6 @@ def receive(index, address, pending):
         print("✅ Success with string hash")
     except Exception as e:
         print(f"❌ Failed with string hash: {e}")
-        
-        # تلاش دوم: با bytes
         try:
             print("Trying acc.receive(hash_=bytes, ...)...")
             rb = acc.receive(hash_=hash_bytes, raw_amt=amount)
@@ -409,9 +390,6 @@ for target in TARGETS:
 
         status = claim(addr)
 
-        # ============================================================
-        # 🔥 FIX: حالا "claimed" هم receive می‌شه!
-        # ============================================================
         if status in ("success", "claimed"):
             item = {"index": idx, "address": addr}
             successful.append(item)
@@ -419,21 +397,26 @@ for target in TARGETS:
             if status == "success":
                 print(f">>> SUCCESSFUL CLAIM for {addr}")
             else:
-                print(f">>> ALREADY CLAIMED - but XNO may be pending. Trying receive...")
+                print(f">>> ALREADY CLAIMED - trying receive...")
             
-            # Wait for the transaction to arrive, then receive it
             pending = wait_for_pending(idx, addr)
             if pending:
-                receive(idx, addr, pending)
+                try:
+                    receive(idx, addr, pending)
+                    # 🔥 مارکر مهم: این آدرس با موفقیت pocket شد
+                    print(f"__SUCCESSFUL_ADDRESS__:{addr}")
+                    sys.stdout.flush()
+                except Exception as e:
+                    print(f"⚠️ receive failed: {e}")
             else:
-                print(f"⚠️ no pending found for {addr} (index {idx}) - nothing to receive")
+                print(f"⚠️ no pending found for {addr} - nothing to receive")
 
         elif status == "ip_limit":
             print("Faucet IP limit reached. Stopping further attempts.")
             break
 
         else:
-            print(f"⚠️ claim failed for {addr} (index {idx}) - status: {status} - skipping")
+            print(f"⚠️ claim failed for {addr} - status: {status} - skipping")
 
         time.sleep(2)
 
